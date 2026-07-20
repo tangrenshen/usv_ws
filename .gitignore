@@ -1,0 +1,17 @@
+*.pyc
+__pycache__/
+*.egg-info/
+build/
+install/
+log/
+*.log
+*.mcap
+*.bag
+perception_log.log
+ros2_ws/
+usv_ws/
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.bak

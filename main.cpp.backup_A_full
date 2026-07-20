@@ -1,0 +1,776 @@
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
+#include <std_msgs/msg/header.hpp>
+#include <cv_bridge/cv_bridge.hpp>
+
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
+
+#include "usv_perception/LidarCalibrator.hpp"
+#include "usv_perception/ImageStitcher.hpp"
+#include "usv_perception/ObstacleDetector.hpp"
+
+#include <vector>
+#include <string>
+#include <mutex>
+#include <cmath>
+#include <chrono>
+#include <memory>
+#include <algorithm>
+#include <unordered_map>
+
+namespace {
+
+usv_perception::LidarExtrinsic toUsvExtrinsic(const LidarExtrinsic & e)
+{
+  usv_perception::LidarExtrinsic u;
+  u.name  = e.name;
+  u.x     = e.x;
+  u.y     = e.y;
+  u.z     = e.z;
+  u.roll  = e.roll;
+  u.pitch = e.pitch;
+  u.yaw   = e.yaw;
+  return u;
+}
+
+LidarExtrinsic fromUsvExtrinsic(const usv_perception::LidarExtrinsic & u)
+{
+  LidarExtrinsic e;
+  e.name  = u.name;
+  e.x     = u.x;
+  e.y     = u.y;
+  e.z     = u.z;
+  e.roll  = u.roll;
+  e.pitch = u.pitch;
+  e.yaw   = u.yaw;
+  return e;
+}
+
+std::vector<usv_perception::LidarExtrinsic> toUsvExtrinsics(
+  const std::vector<LidarExtrinsic> & v)
+{
+  std::vector<usv_perception::LidarExtrinsic> out;
+  out.reserve(v.size());
+  for (const auto & e : v) out.push_back(toUsvExtrinsic(e));
+  return out;
+}
+
+std::vector<LidarExtrinsic> fromUsvExtrinsics(
+  const std::vector<usv_perception::LidarExtrinsic> & v)
+{
+  std::vector<LidarExtrinsic> out;
+  out.reserve(v.size());
+  for (const auto & u : v) out.push_back(fromUsvExtrinsic(u));
+  return out;
+}
+
+FisheyeIntrinsic makeFisheyeIntrinsicPlaceholder(int w, int h, double hfov_deg)
+{
+  FisheyeIntrinsic intr;
+  intr.img_w = w;
+  intr.img_h = h;
+  intr.hfov_deg = hfov_deg;
+  intr.lens_c2  = 4.0;
+  intr.lens_c3  = 0.0;
+  intr.K = cv::Mat::eye(3, 3, CV_64F);
+  intr.D = cv::Mat::zeros(1, 4, CV_64F);
+  return intr;
+}
+
+}  
+
+class SpatialMemory {
+public:
+  std::vector<DetectedObstacle> vote(
+      const std::vector<DetectedObstacle>& raw_blocks, double now_sec)
+  {
+    if (last_update_sec_ < 0.0) last_update_sec_ = now_sec;
+    double dt = now_sec - last_update_sec_;
+    last_update_sec_ = now_sec;
+    if (dt < 0.0) dt = 0.0;
+
+    std::vector<int64_t> hit_keys;
+    hit_keys.reserve(raw_blocks.size());
+    for (const auto& b : raw_blocks) {
+      int64_t key = gridKey(b.center.x, b.center.y);
+      if (std::find(hit_keys.begin(), hit_keys.end(), key) == hit_keys.end()) {
+        hit_keys.push_back(key);
+      }
+      auto it = votes_.find(key);
+      if (it == votes_.end()) {
+        Cell c;
+        c.votes = 1.0;
+        c.last_obs = b;
+        c.last_hit_sec = now_sec;
+        votes_[key] = c;
+      } else {
+        it->second.votes += 1.0;
+        it->second.last_obs = b;
+        it->second.last_hit_sec = now_sec;
+      }
+    }
+
+    for (auto it = votes_.begin(); it != votes_.end(); ) {
+      bool hit_this_frame = std::find(hit_keys.begin(), hit_keys.end(), it->first) != hit_keys.end();
+      if (!hit_this_frame) {
+        it->second.votes -= kDecayPerSec * dt;
+        if (it->second.votes <= 0.0 &&
+            (now_sec - it->second.last_hit_sec) > kForgetSec) {
+          it = votes_.erase(it);
+          continue;
+        }
+      }
+      ++it;
+    }
+
+    std::vector<DetectedObstacle> confirmed;
+    for (const auto& kv : votes_) {
+      if (kv.second.votes >= kConfirmThreshold) {
+        confirmed.push_back(kv.second.last_obs);
+      }
+    }
+    return confirmed;
+  }
+
+private:
+  struct Cell {
+    double votes = 0.0;
+    DetectedObstacle last_obs;
+    double last_hit_sec = 0.0;
+  };
+
+  static int64_t gridKey(float x, float y) {
+    int32_t gx = static_cast<int32_t>(std::floor(x / kGridSize));
+    int32_t gy = static_cast<int32_t>(std::floor(y / kGridSize));
+    return (static_cast<int64_t>(gx) << 32) ^ (static_cast<uint32_t>(gy));
+  }
+
+  std::unordered_map<int64_t, Cell> votes_;
+  double last_update_sec_ = -1.0;
+
+  static constexpr double kGridSize        = 1.0;
+  static constexpr double kDecayPerSec     = 0.5;
+  static constexpr double kConfirmThreshold = 15.0;
+  static constexpr double kForgetSec       = 30.0;
+};
+
+class BlockStabilityTracker {
+public:
+  std::vector<DetectedObstacle> filterStableBlocks(
+      const std::vector<DetectedObstacle>& raw_blocks, double now_sec)
+  {
+    std::vector<DetectedObstacle> stable_out;
+    std::vector<bool> matched(tracked_.size(), false);
+
+    for (const auto& cand : raw_blocks) {
+      int best_idx = -1;
+      double best_d = kMatchDist;
+      for (size_t i = 0; i < tracked_.size(); ++i) {
+        double dx = tracked_[i].last_obs.center.x - cand.center.x;
+        double dy = tracked_[i].last_obs.center.y - cand.center.y;
+        double d = std::sqrt(dx*dx + dy*dy);
+        if (d < best_d) { best_d = d; best_idx = static_cast<int>(i); }
+      }
+
+      if (best_idx == -1) {
+        Track t;
+        t.first_obs = cand;
+        t.last_obs = cand;
+        t.first_seen_sec = now_sec;
+        t.last_seen_sec = now_sec;
+        tracked_.push_back(t);
+        continue;
+      }
+
+      auto& t = tracked_[best_idx];
+      matched[best_idx] = true;
+      double drift_dx = t.first_obs.center.x - cand.center.x;
+      double drift_dy = t.first_obs.center.y - cand.center.y;
+      double total_drift = std::sqrt(drift_dx*drift_dx + drift_dy*drift_dy);
+      t.last_obs = cand;
+      t.last_seen_sec = now_sec;
+
+      if (total_drift > kDriftLimit) {
+        t.first_obs = cand;
+        t.first_seen_sec = now_sec;
+        continue;
+      }
+
+      if (now_sec - t.first_seen_sec >= kMinObserveSec) {
+        stable_out.push_back(t.last_obs);
+      }
+    }
+
+    size_t original_size = matched.size();
+    std::vector<Track> kept;
+    for (size_t i = 0; i < tracked_.size(); ++i) {
+      bool was_matched = (i < original_size) ? matched[i] : true;
+      if (was_matched || (now_sec - tracked_[i].last_seen_sec) < kStaleSec) {
+        kept.push_back(tracked_[i]);
+      }
+    }
+    tracked_ = kept;
+    return stable_out;
+
+  }
+
+private:
+  struct Track {
+    DetectedObstacle first_obs;
+    DetectedObstacle last_obs;
+    double first_seen_sec = 0.0;
+    double last_seen_sec  = 0.0;
+  };
+  std::vector<Track> tracked_;
+
+  static constexpr double kMatchDist    = 1.2;
+  static constexpr double kDriftLimit   = 0.4;
+  static constexpr double kMinObserveSec = 0.5;
+  static constexpr double kStaleSec     = 5.0;
+};
+
+class PerceptionNode : public rclcpp::Node
+{
+public:
+  PerceptionNode() : Node("usv_perception_node")
+  {
+    RCLCPP_INFO(get_logger(), "无人船全模态感知节点启动...");
+
+    declare_parameter<std::vector<std::string>>("camera_names",
+      {"front_camera", "right_camera", "right2_camera", "back_camera", "left2_camera", "left_camera"});
+    declare_parameter<std::vector<std::string>>("lidar_names",
+      {"front_lidar", "right_lidar", "right2_lidar", "back_lidar", "left2_lidar", "left_lidar", "forward_lidar"});
+    declare_parameter<double>("image_stale_sec", 0.5);
+    declare_parameter<double>("lidar_stale_sec", 0.5);
+    declare_parameter<double>("image_timer_period_sec", 0.2);
+    declare_parameter<double>("lidar_timer_period_sec", 0.1);
+    declare_parameter<double>("calib_timer_period_sec", 1.0);
+    declare_parameter<int>("calib_max_attempts", 3);
+    declare_parameter<double>("lidar_sync_tolerance_sec", 0.15);
+
+    camera_names_          = get_parameter("camera_names").as_string_array();
+    lidar_names_           = get_parameter("lidar_names").as_string_array();
+    image_stale_sec_       = get_parameter("image_stale_sec").as_double();
+    lidar_stale_sec_       = get_parameter("lidar_stale_sec").as_double();
+    image_timer_period_    = get_parameter("image_timer_period_sec").as_double();
+    lidar_timer_period_    = get_parameter("lidar_timer_period_sec").as_double();
+    calib_timer_period_    = get_parameter("calib_timer_period_sec").as_double();
+    calib_max_attempts_    = get_parameter("calib_max_attempts").as_int();
+    lidar_sync_tolerance_sec_ = get_parameter("lidar_sync_tolerance_sec").as_double();
+
+    nominal_lidars_ = {
+      {"front_lidar",    7.0,  0.0,    2.9, 0.0, 115.0,   0.0},
+      {"right_lidar",   -6.0, -1.626,  2.9, 0.0, 115.0, -90.0},
+      {"right2_lidar",   6.0, -1.626,  2.9, 0.0, 115.0, -90.0},
+      {"back_lidar",    -7.0,  0.0,    2.9, 0.0, 115.0, 180.0},
+      {"left2_lidar",    6.0,  1.626,  2.9, 0.0, 115.0,  90.0},
+      {"left_lidar",    -6.0,  1.626,  2.9, 0.0, 115.0,  90.0},
+      {"forward_lidar",  7.0,  0.0,    2.0, 0.0,   0.0,   0.0},
+    };
+
+    calibrator_ = std::make_unique<usv_perception::LidarCalibrator>(0.5, 10.0, 15, 0.02, 0.1);
+
+    stitcher_ = std::make_shared<ImageStitcher>();
+    std::vector<FisheyeIntrinsic> intrinsics(
+      camera_names_.size(),
+      makeFisheyeIntrinsicPlaceholder(1280, 720, 3.054 * 180.0 / M_PI));
+    stitcher_->setFisheyeIntrinsics(intrinsics);
+    stitcher_->setBEVConfig(/*range_m=*/10.0, /*output_px=*/1000, /*ground_z_m=*/0.0);
+    stitcher_->setLidarExtrinsics(nominal_lidars_);
+    stitcher_->setSelfOcclusionBox(/*x_half=*/7.5, /*y_half=*/2.75);
+    {
+      std::vector<CameraExtrinsic> cam_ext(camera_names_.size());
+      for (size_t i = 0; i < camera_names_.size() && i < nominal_lidars_.size(); ++i) {
+        cam_ext[i].name = camera_names_[i];
+        Eigen::Isometry3d T_cam_nom = Eigen::Isometry3d::Identity();
+        T_cam_nom.linear() = (Eigen::AngleAxisd(nominal_lidars_[i].yaw * M_PI / 180.0, Eigen::Vector3d::UnitZ()) *
+                              Eigen::AngleAxisd(25.0 * M_PI / 180.0, Eigen::Vector3d::UnitY()) *
+                              Eigen::AngleAxisd(nominal_lidars_[i].roll * M_PI / 180.0, Eigen::Vector3d::UnitX())).toRotationMatrix();
+        T_cam_nom.translation() = Eigen::Vector3d(nominal_lidars_[i].x, nominal_lidars_[i].y, nominal_lidars_[i].z + 0.1);
+        cam_ext[i].x = T_cam_nom.translation().x();
+        cam_ext[i].y = T_cam_nom.translation().y();
+        cam_ext[i].z = T_cam_nom.translation().z();
+        Eigen::Vector3d ypr = T_cam_nom.rotation().eulerAngles(2, 1, 0);
+        cam_ext[i].yaw   = ypr[0] * 180.0 / M_PI;
+        cam_ext[i].pitch = ypr[1] * 180.0 / M_PI;
+        cam_ext[i].roll  = ypr[2] * 180.0 / M_PI;
+      }
+      stitcher_->setCameraExtrinsics(cam_ext);
+    }
+
+    latest_images_.resize(camera_names_.size());
+    img_wall_time_.resize(camera_names_.size());
+    img_has_data_.assign(camera_names_.size(), false);
+    img_msg_count_.assign(camera_names_.size(), 0);
+
+    latest_lidars_.resize(lidar_names_.size());
+    lidar_wall_time_.resize(lidar_names_.size());
+    lidar_has_data_.assign(lidar_names_.size(), false);
+    lidar_stamp_sec_.assign(lidar_names_.size(), 0.0);
+    lidar_msg_count_.assign(lidar_names_.size(), 0);
+    lidar_mtx_.resize(lidar_names_.size());
+    for (auto & m : lidar_mtx_) {
+      m = std::make_unique<std::mutex>();
+    }
+
+    sub_group_          = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    image_timer_group_  = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    lidar_timer_group_  = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    calib_timer_group_  = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    rclcpp::SubscriptionOptions sub_opts;
+    sub_opts.callback_group = sub_group_;
+
+    for (size_t i = 0; i < camera_names_.size(); ++i) {
+      const std::string topic =
+        "/wamv/sensors/cameras/" + camera_names_[i] + "_sensor/optical/image_raw";
+      img_subs_.push_back(create_subscription<sensor_msgs::msg::Image>(
+        topic, rclcpp::SensorDataQoS(),
+        [this, i](sensor_msgs::msg::Image::SharedPtr m) { onImage(m, i); },
+        sub_opts));
+    }
+
+    for (size_t i = 0; i < lidar_names_.size(); ++i) {
+      const std::string topic =
+        "/wamv/sensors/lidars/" + lidar_names_[i] + "_sensor/points";
+      lidar_subs_.push_back(create_subscription<sensor_msgs::msg::PointCloud2>(
+        topic, rclcpp::SensorDataQoS(),
+        [this, i](sensor_msgs::msg::PointCloud2::SharedPtr m) { onLidar(m, i); },
+        sub_opts));
+    }
+
+    pub_bev_     = create_publisher<sensor_msgs::msg::Image>("/world/obstacles/bev_check", 10);
+    pub_lidar_   = create_publisher<sensor_msgs::msg::PointCloud2>("/world/obstacles/lidar_check", 10);
+    pub_buoys_   = create_publisher<geometry_msgs::msg::PoseArray>("/world/obstacles/buoys_check", 10);
+    pub_boats_   = create_publisher<geometry_msgs::msg::PoseArray>("/world/obstacles/boats_check", 10);
+    pub_pillars_ = create_publisher<geometry_msgs::msg::PoseArray>("/world/obstacles/pillars_check", 10);
+    pub_blocks_  = create_publisher<geometry_msgs::msg::PoseArray>("/world/obstacles/blocks_check", 10);
+
+    image_timer_ = create_wall_timer(
+      std::chrono::duration<double>(image_timer_period_),
+      std::bind(&PerceptionNode::processImageBranch, this),
+      image_timer_group_);
+
+    lidar_timer_ = create_wall_timer(
+      std::chrono::duration<double>(lidar_timer_period_),
+      std::bind(&PerceptionNode::processLidarBranch, this),
+      lidar_timer_group_);
+
+    calib_timer_ = create_wall_timer(
+      std::chrono::duration<double>(calib_timer_period_),
+      std::bind(&PerceptionNode::processCalibrationBranch, this),
+      calib_timer_group_);
+
+    RCLCPP_INFO(get_logger(),
+      ">> 初始化完毕：BEV/雷达感知已用名义外参启动，自标定在后台低频跑，收敛后自动热替换。");
+  }
+
+  void printQoSCounters() {
+    RCLCPP_INFO(get_logger(), "=== QoS消息计数 ===");
+    RCLCPP_INFO(get_logger(), "[QoS] 雷达消息数 (期望768条):");
+    for (size_t i = 0; i < lidar_names_.size(); ++i) {
+      RCLCPP_INFO(get_logger(), "[QoS]   %s: %zu条 (丢失%.1f%%)", lidar_names_[i].c_str(), lidar_msg_count_[i], (1.0 - lidar_msg_count_[i]/768.0)*100);
+    }
+    RCLCPP_INFO(get_logger(), "[QoS] 相机消息数 (期望384条):");
+    for (size_t i = 0; i < camera_names_.size(); ++i) {
+      RCLCPP_INFO(get_logger(), "[QoS]   %s: %zu条 (丢失%.1f%%)", camera_names_[i].c_str(), img_msg_count_[i], (1.0 - img_msg_count_[i]/384.0)*100);
+    }
+  }
+
+private:
+  void onImage(sensor_msgs::msg::Image::SharedPtr msg, size_t idx)
+  {
+    cv::Mat img;
+    try {
+      img = cv_bridge::toCvCopy(msg, "bgr8")->image;
+    } catch (const cv_bridge::Exception & e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "cv_bridge转换失败: %s", e.what());
+      return;
+    }
+    std::lock_guard<std::mutex> lk(img_mtx_);
+    latest_images_[idx]  = std::move(img);
+    img_wall_time_[idx]  = std::chrono::steady_clock::now();
+    img_has_data_[idx]   = true;
+    img_msg_count_[idx]++;
+  }
+
+  void onLidar(sensor_msgs::msg::PointCloud2::SharedPtr msg, size_t idx)
+  {
+    std::vector<cv::Point3f> pts;
+    pts.reserve(static_cast<size_t>(msg->width) * msg->height);
+    sensor_msgs::PointCloud2ConstIterator<float> ix(*msg, "x"), iy(*msg, "y"), iz(*msg, "z");
+
+    for (; ix != ix.end(); ++ix, ++iy, ++iz) {
+      pts.emplace_back(*ix, *iy, *iz);
+    }
+
+    const double sensor_stamp_sec =
+      static_cast<double>(msg->header.stamp.sec) +
+      static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
+
+    std::lock_guard<std::mutex> lk(*lidar_mtx_[idx]);
+    latest_lidars_[idx]    = std::move(pts);
+    lidar_wall_time_[idx]  = std::chrono::steady_clock::now();
+    lidar_stamp_sec_[idx]  = sensor_stamp_sec;
+    lidar_has_data_[idx]   = true;
+    lidar_msg_count_[idx]++;
+  }
+
+  void processImageBranch()
+  {
+    std::vector<cv::Mat> imgs;
+    {
+      std::lock_guard<std::mutex> lk(img_mtx_);
+      for (size_t i = 0; i < camera_names_.size(); ++i) {
+        if (!img_has_data_[i]) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+            "[BEV] %s 尚未收到过数据，本周期跳过", camera_names_[i].c_str());
+          return;
+        }
+        const double age = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - img_wall_time_[i]).count();
+        if (age > image_stale_sec_) {
+          RCLCPP_WARN(get_logger(),
+            "[BEV] %s 数据陈旧(%.2fs)，用缓存帧继续拼图(降级)", camera_names_[i].c_str(), age);
+        }
+      }
+      imgs = latest_images_;
+    }
+
+    cv::Mat bev = stitcher_->processFrames(imgs);
+    if (bev.empty()) return;
+
+    auto msg = cv_bridge::CvImage(std_msgs::msg::Header{}, "bgr8", bev).toImageMsg();
+    msg->header.stamp = now();
+    msg->header.frame_id = "wamv/base_link";
+    pub_bev_->publish(*msg);
+    cv::imwrite("/tmp/bev_result.png", bev);
+  }
+
+  void processLidarBranch()
+  {
+    auto branch_start = std::chrono::steady_clock::now();
+    
+    std::vector<std::vector<cv::Point3f>> clouds;
+    std::vector<double> stamps;
+    for (auto & m : lidar_mtx_) {
+      m->lock();
+    }
+    for (size_t i = 0; i < lidar_names_.size(); ++i) {
+      if (!lidar_has_data_[i]) {
+        for (auto & m : lidar_mtx_) {
+          m->unlock();
+        }
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+          "[LIDAR] %s 尚未收到过数据，本周期跳过", lidar_names_[i].c_str());
+        return;
+      }
+      const double age = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - lidar_wall_time_[i]).count();
+      if (age > lidar_stale_sec_) {
+        RCLCPP_WARN(get_logger(),
+          "[LIDAR] %s 数据陈旧(%.2fs)，用缓存点云继续(降级)", lidar_names_[i].c_str(), age);
+      }
+    }
+    clouds = latest_lidars_;
+    stamps = lidar_stamp_sec_;
+    for (auto & m : lidar_mtx_) {
+      m->unlock();
+    }
+
+    const double min_stamp = *std::min_element(stamps.begin(), stamps.end());
+    const double max_stamp = *std::max_element(stamps.begin(), stamps.end());
+    const double sync_span = max_stamp - min_stamp;
+    
+    if (sync_span > lidar_sync_tolerance_sec_) {
+      RCLCPP_WARN(get_logger(),
+        "[LIDAR] 7路时间戳最大偏差%.3fs，超过同步容差%.3fs，"
+        "本帧跳过不发布", sync_span, lidar_sync_tolerance_sec_);
+      return;
+    }
+
+    auto fused = stitcher_->fuseLidarClouds(clouds);
+    if (fused.empty()) return;
+
+    pub_lidar_->publish(makePCL2Msg(fused, max_stamp));
+    auto obs = detector_.detect(fused, max_stamp);
+
+    {
+      obs.blocks = block_tracker_.filterStableBlocks(obs.blocks, max_stamp);
+    }
+
+    std::vector<cv::Mat> current_imgs;
+    {
+      std::lock_guard<std::mutex> lk(img_mtx_);
+      current_imgs = latest_images_;
+    }
+    stitcher_->fuseVisionColor(obs.buoys, current_imgs);
+    stitcher_->verifyPillarColor(obs.pillars, current_imgs);
+    stitcher_->verifyBlockColor(obs.blocks, current_imgs);
+
+    publishObstacles(obs, max_stamp);
+    
+    auto branch_end = std::chrono::steady_clock::now();
+    auto branch_duration_ms = std::chrono::duration<double, std::milli>(branch_end - branch_start).count();
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+        "[processLidarBranch耗时] %.2fms (定时器周期=100ms)", branch_duration_ms);
+  }
+
+  void processCalibrationBranch()
+  {
+    if (calib_done_) return;
+
+    std::vector<std::vector<cv::Point3f>> clouds;
+    for (auto & m : lidar_mtx_) {
+      m->lock();
+    }
+    for (size_t i = 0; i < lidar_names_.size(); ++i) {
+      if (!lidar_has_data_[i]) {
+        for (auto & m : lidar_mtx_) {
+          m->unlock();
+        }
+        return;
+      }
+    }
+    clouds = latest_lidars_;
+    for (auto & m : lidar_mtx_) {
+      m->unlock();
+    }
+
+    usv_perception::CalibResult res =
+      calibrator_->calibrate(clouds, toUsvExtrinsics(nominal_lidars_));
+    ++calib_attempts_;
+
+    RCLCPP_INFO(get_logger(), "[标定] 第%d次尝试: %s, 用了%d轮",
+      calib_attempts_, res.ok ? "收敛" : "未收敛", res.rounds_used);
+
+    bool accept = res.ok;
+    if (!accept && calib_attempts_ >= calib_max_attempts_) {
+      RCLCPP_WARN(get_logger(),
+        "[标定] 达到最大尝试次数(%d)仍未完全收敛，采用当前最优估计，不再阻塞", calib_max_attempts_);
+      accept = true;
+    }
+    if (!accept) return;
+
+    last_calib_result_ = res;
+
+    // NaN防护：检查refined_extrinsics所有字段是否有限
+    // SVD在数据退化（点云太少/共线）时可能产生NaN，收敛判定不检测NaN会误判为成功
+    bool has_nan = false;
+    for (size_t i = 0; i < last_calib_result_.refined_extrinsics.size(); ++i) {
+      const auto& ext = last_calib_result_.refined_extrinsics[i];
+      if (!std::isfinite(ext.x) || !std::isfinite(ext.y) || !std::isfinite(ext.z) ||
+          !std::isfinite(ext.roll) || !std::isfinite(ext.pitch) || !std::isfinite(ext.yaw)) {
+        RCLCPP_ERROR(get_logger(),
+          "[标定NaN防护] %s 外参含非有限值(x=%.3f,y=%.3f,z=%.3f,roll=%.3f,pitch=%.3f,yaw=%.3f)，拒绝热替换",
+          ext.name.c_str(), ext.x, ext.y, ext.z, ext.roll, ext.pitch, ext.yaw);
+        has_nan = true;
+      }
+    }
+    if (has_nan) {
+      RCLCPP_ERROR(get_logger(),
+        "[标定NaN防护] 检测到NaN外参，拒绝热替换，沿用名义外参。SVD在数据退化时产生NaN。");
+      calib_done_ = true;
+      printQoSCounters();
+      return;
+    }
+
+    for (size_t i = 0; i < nominal_lidars_.size(); ++i) {
+      auto& refined = last_calib_result_.refined_extrinsics[i];
+      RCLCPP_INFO(get_logger(),
+        "[标定核查] %s  名义(...,p=%.1f,y=%.1f) -> 优化后(...,p=%.1f,y=%.1f)",
+        nominal_lidars_[i].name.c_str(),
+        nominal_lidars_[i].pitch, nominal_lidars_[i].yaw,
+        refined.pitch, refined.yaw);
+      RCLCPP_INFO(get_logger(),
+        "[标定核查-真实修正量] %s  平移修正=%.3fm  旋转修正=%.2f°  (夹紧上限: 0.5m/10.0°)",
+        nominal_lidars_[i].name.c_str(),
+        res.per_sensor_correction_norm_m[i],
+        res.per_sensor_rotation_deg[i]);
+    }
+
+    applyCalibratedExtrinsics();
+    calib_done_ = true;
+    RCLCPP_INFO(get_logger(), ">> [标定完成] 精确外参已热替换到BEV与雷达融合流水线");
+
+    printQoSCounters();
+  }
+
+  void applyCalibratedExtrinsics()
+  {
+    std::vector<LidarExtrinsic> lidar_ext = fromUsvExtrinsics(last_calib_result_.refined_extrinsics);
+    stitcher_->setLidarExtrinsics(lidar_ext);
+    stitcher_->setSelfOcclusionBox(/*x_half=*/7.5, /*y_half=*/2.75);
+
+    std::vector<CameraExtrinsic> cam_ext(camera_names_.size());
+    for (size_t i = 0; i < camera_names_.size() && i < lidar_ext.size(); ++i) {
+      cam_ext[i].name = camera_names_[i];
+
+      Eigen::Isometry3d T_lidar_nom = Eigen::Isometry3d::Identity();
+      T_lidar_nom.linear() = (Eigen::AngleAxisd(nominal_lidars_[i].yaw * M_PI / 180.0, Eigen::Vector3d::UnitZ()) *
+                              Eigen::AngleAxisd(nominal_lidars_[i].pitch * M_PI / 180.0, Eigen::Vector3d::UnitY()) *
+                              Eigen::AngleAxisd(nominal_lidars_[i].roll * M_PI / 180.0, Eigen::Vector3d::UnitX())).toRotationMatrix();
+      T_lidar_nom.translation() = Eigen::Vector3d(nominal_lidars_[i].x, nominal_lidars_[i].y, nominal_lidars_[i].z);
+
+      Eigen::Isometry3d T_cam_nom = Eigen::Isometry3d::Identity();
+      T_cam_nom.linear() = (Eigen::AngleAxisd(nominal_lidars_[i].yaw * M_PI / 180.0, Eigen::Vector3d::UnitZ()) *
+                            Eigen::AngleAxisd(25.0 * M_PI / 180.0, Eigen::Vector3d::UnitY()) *
+                            Eigen::AngleAxisd(nominal_lidars_[i].roll * M_PI / 180.0, Eigen::Vector3d::UnitX())).toRotationMatrix();
+      T_cam_nom.translation() = Eigen::Vector3d(nominal_lidars_[i].x, nominal_lidars_[i].y, nominal_lidars_[i].z + 0.1);
+
+      Eigen::Isometry3d T_lidar_real = Eigen::Isometry3d::Identity();
+      T_lidar_real.linear() = (Eigen::AngleAxisd(lidar_ext[i].yaw * M_PI / 180.0, Eigen::Vector3d::UnitZ()) *
+                               Eigen::AngleAxisd(lidar_ext[i].pitch * M_PI / 180.0, Eigen::Vector3d::UnitY()) *
+                               Eigen::AngleAxisd(lidar_ext[i].roll * M_PI / 180.0, Eigen::Vector3d::UnitX())).toRotationMatrix();
+      T_lidar_real.translation() = Eigen::Vector3d(lidar_ext[i].x, lidar_ext[i].y, lidar_ext[i].z);
+
+      Eigen::Isometry3d delta_T = T_lidar_real * T_lidar_nom.inverse();
+      Eigen::Isometry3d T_cam_real = delta_T * T_cam_nom;
+
+      cam_ext[i].x = T_cam_real.translation().x();
+      cam_ext[i].y = T_cam_real.translation().y();
+      cam_ext[i].z = T_cam_real.translation().z();
+      Eigen::Vector3d ypr = T_cam_real.rotation().eulerAngles(2, 1, 0);
+      cam_ext[i].yaw   = ypr[0] * 180.0 / M_PI;
+      cam_ext[i].pitch = ypr[1] * 180.0 / M_PI;
+      cam_ext[i].roll  = ypr[2] * 180.0 / M_PI;
+    }
+
+    stitcher_->setCameraExtrinsics(cam_ext);
+
+    stitcher_->setBEVConfig(/*range_m=*/10.0, /*output_px=*/1000, /*ground_z_m=*/0.0);
+  }
+
+  sensor_msgs::msg::PointCloud2 makePCL2Msg(
+    const std::vector<cv::Point3f> & pts, double stamp_sec) const
+  {
+    sensor_msgs::msg::PointCloud2 msg;
+    msg.header.stamp.sec     = static_cast<int32_t>(std::floor(stamp_sec));
+    msg.header.stamp.nanosec =
+      static_cast<uint32_t>((stamp_sec - std::floor(stamp_sec)) * 1e9);
+    msg.header.frame_id = "wamv/base_link";
+    msg.height = 1;
+    msg.width = static_cast<uint32_t>(pts.size());
+    msg.is_dense = false;
+    msg.is_bigendian = false;
+
+    sensor_msgs::PointCloud2Modifier mod(msg);
+    mod.setPointCloud2FieldsByString(1, "xyz");
+    mod.resize(pts.size());
+
+    sensor_msgs::PointCloud2Iterator<float> ox(msg, "x"), oy(msg, "y"), oz(msg, "z");
+    for (const auto & p : pts) {
+      *ox = p.x; *oy = p.y; *oz = p.z;
+      ++ox; ++oy; ++oz;
+    }
+    return msg;
+  }
+
+  void publishObstacles(const ObstacleSet & obs, double sensor_stamp_sec)
+  {
+    const auto stamp = rclcpp::Time(static_cast<int32_t>(sensor_stamp_sec), static_cast<uint32_t>((sensor_stamp_sec - static_cast<int32_t>(sensor_stamp_sec)) * 1e9));
+    auto fill = [&](const std::vector<DetectedObstacle> & list) {
+      geometry_msgs::msg::PoseArray msg;
+      msg.header.stamp = stamp;
+      msg.header.frame_id = "wamv/base_link";
+      msg.poses.reserve(list.size());
+      for (const auto & ob : list) {
+        geometry_msgs::msg::Pose pose;
+        pose.position.x = ob.center.x;
+        pose.position.y = ob.center.y;
+        pose.position.z = ob.center.z;
+        pose.orientation.w = std::cos(ob.yaw / 2.0);
+        pose.orientation.z = std::sin(ob.yaw / 2.0);
+        msg.poses.push_back(pose);
+      }
+      return msg;
+    };
+
+    pub_buoys_->publish(fill(obs.buoys));
+    pub_boats_->publish(fill(obs.boats));
+    pub_pillars_->publish(fill(obs.pillars));
+    pub_blocks_->publish(fill(obs.blocks));
+    int orange_cnt = 0, black_cnt = 0, unk_cnt = 0;
+    for (const auto& b : obs.buoys) {
+        if (b.color == "orange") orange_cnt++;
+        else if (b.color == "black") black_cnt++;
+        else unk_cnt++;
+        RCLCPP_INFO(get_logger(), "[浮球核验] 船体系=(%.2f,%.2f,%.2f) 颜色=%s", b.center.x, b.center.y, b.center.z, b.color.c_str());
+    }
+    int pillar_verified_cnt = 0, pillar_unverified_cnt = 0, pillar_unknown_cnt = 0;
+    for (const auto& p : obs.pillars) {
+        if (p.color == "tan_verified") pillar_verified_cnt++;
+        else if (p.color == "tan_unverified") pillar_unverified_cnt++;
+        else pillar_unknown_cnt++;
+    }
+    for (const auto& bt : obs.boats) {
+        RCLCPP_INFO(get_logger(), "[游船核验] t=%.4f 船体系=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) 点数=%d", sensor_stamp_sec, bt.center.x, bt.center.y, bt.center.z, bt.size.x, bt.size.y, bt.size.z, bt.num_points);
+    }
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+      ">> [检测] 浮球%zu(橙%d,黑%d,未知%d) | 游船%zu | 立柱%zu(验证%d,未验证%d,未知%d) | 浮块%zu",
+      obs.buoys.size(), orange_cnt, black_cnt, unk_cnt,
+      obs.boats.size(), obs.pillars.size(), pillar_verified_cnt, pillar_unverified_cnt, pillar_unknown_cnt,
+      obs.blocks.size());
+  }
+
+  std::vector<std::string> camera_names_, lidar_names_;
+  double image_stale_sec_ = 0.5;
+  double lidar_stale_sec_ = 0.5;
+  double image_timer_period_ = 0.2;
+  double lidar_timer_period_ = 0.1;
+  double calib_timer_period_ = 1.0;
+  int    calib_max_attempts_ = 60;
+  double lidar_sync_tolerance_sec_ = 0.15;
+
+  std::shared_ptr<ImageStitcher> stitcher_;
+  ObstacleDetector detector_;
+  std::unique_ptr<usv_perception::LidarCalibrator> calibrator_;
+  BlockStabilityTracker block_tracker_;
+  std::vector<LidarExtrinsic> nominal_lidars_;
+  usv_perception::CalibResult last_calib_result_;
+
+  int  calib_attempts_ = 0;
+  bool calib_done_ = false;
+
+  rclcpp::CallbackGroup::SharedPtr sub_group_, image_timer_group_, lidar_timer_group_, calib_timer_group_;
+  rclcpp::TimerBase::SharedPtr image_timer_, lidar_timer_, calib_timer_;
+
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> img_subs_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr> lidar_subs_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_bev_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_lidar_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_buoys_, pub_boats_, pub_pillars_, pub_blocks_;
+
+  std::mutex img_mtx_;
+  std::vector<cv::Mat> latest_images_;
+  std::vector<std::chrono::steady_clock::time_point> img_wall_time_;
+  std::vector<bool> img_has_data_;
+
+  std::vector<std::unique_ptr<std::mutex>> lidar_mtx_;
+  std::vector<std::vector<cv::Point3f>> latest_lidars_;
+  std::vector<std::chrono::steady_clock::time_point> lidar_wall_time_;
+  std::vector<double> lidar_stamp_sec_;
+  std::vector<bool> lidar_has_data_;
+  std::vector<size_t> lidar_msg_count_;
+  std::vector<size_t> img_msg_count_;
+};
+
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<PerceptionNode>();
+  
+  rclcpp::on_shutdown([&node]() {
+    node->printQoSCounters();
+  });
+  
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
+  executor.add_node(node);
+  executor.spin();
+  rclcpp::shutdown();
+  return 0;
+}

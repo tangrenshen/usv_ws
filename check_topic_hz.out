@@ -1,0 +1,53 @@
+=== 话题频率检查脚本 ===
+Bag持续时间: 86.23 s
+期望相机频率: 4.45 Hz
+期望雷达频率: 8.9 Hz
+
+=== 启动所有话题频率监控 (后台运行) ===
+启动监控: /wamv/sensors/cameras/front_camera_sensor/optical/image_raw
+启动监控: /wamv/sensors/cameras/right_camera_sensor/optical/image_raw
+启动监控: /wamv/sensors/cameras/right2_camera_sensor/optical/image_raw
+启动监控: /wamv/sensors/cameras/back_camera_sensor/optical/image_raw
+启动监控: /wamv/sensors/cameras/left2_camera_sensor/optical/image_raw
+启动监控: /wamv/sensors/cameras/left_camera_sensor/optical/image_raw
+启动监控: /wamv/sensors/lidars/front_lidar_sensor/points
+启动监控: /wamv/sensors/lidars/right_lidar_sensor/points
+启动监控: /wamv/sensors/lidars/right2_lidar_sensor/points
+启动监控: /wamv/sensors/lidars/back_lidar_sensor/points
+启动监控: /wamv/sensors/lidars/left2_lidar_sensor/points
+启动监控: /wamv/sensors/lidars/left_lidar_sensor/points
+启动监控: /wamv/sensors/lidars/forward_lidar_sensor/points
+
+等待测量完成 (90秒)...
+
+=== 收集测量结果 ===
+
+--- 相机话题 ---
+[image_raw]:
+
+[image_raw]:
+
+[image_raw]:
+
+[image_raw]:
+
+[image_raw]:
+
+[image_raw]:
+
+--- 雷达话题 ---
+[points]:
+
+[points]:
+
+[points]:
+
+[points]:
+
+[points]:
+
+[points]:
+
+[points]:
+
+结果已保存到: topic_hz_result.log
