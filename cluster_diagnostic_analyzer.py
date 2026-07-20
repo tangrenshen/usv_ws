@@ -343,3 +343,46 @@ if buoy_misses:
         print(f"    [{rng[0]}, {rng[1]}): {cnt} ({pct:.1f}%)")
 else:
     print(f"  无数据(没有buoy误判)")
+
+print(f"\n=== 漏检真船距离分桶 ===")
+dist_bins = [(0, 20), (20, 40), (40, 60), (60, 100)]
+dist_counts = {}
+for miss in missed_gt_details:
+    dist = math.hypot(miss['gt_x'], miss['gt_y'])
+    for rng in dist_bins:
+        if rng[0] <= dist < rng[1]:
+            dist_counts[rng] = dist_counts.get(rng, 0) + 1
+            break
+
+for rng in dist_bins:
+    count = dist_counts.get(rng, 0)
+    percent = count / len(missed_gt_details) * 100 if missed_gt_details else 0
+    print(f"  [{rng[0]}, {rng[1]}m): {count} ({percent:.1f}%)")
+
+print(f"\n=== boat vs pillar同距离点数对比 ===")
+all_cluster_by_label = {}
+for ct, clusters in cluster_frames.items():
+    for cluster in clusters:
+        label = cluster['label'] or 'unknown'
+        if label not in all_cluster_by_label:
+            all_cluster_by_label[label] = []
+        dist = math.hypot(cluster['x'], cluster['y'])
+        all_cluster_by_label[label].append((dist, cluster['pts']))
+
+for label in ['boat', 'pillar', 'buoy', 'block']:
+    if label not in all_cluster_by_label or len(all_cluster_by_label[label]) == 0:
+        print(f"  {label}: 无数据")
+        continue
+    pts_by_dist = {}
+    for dist, pts in all_cluster_by_label[label]:
+        bin_idx = min(int(dist // 20), 3)
+        if bin_idx not in pts_by_dist:
+            pts_by_dist[bin_idx] = []
+        pts_by_dist[bin_idx].append(pts)
+    print(f"  {label}:")
+    for bin_idx in [0, 1, 2, 3]:
+        if bin_idx not in pts_by_dist or len(pts_by_dist[bin_idx]) == 0:
+            continue
+        bin_name = f"[{bin_idx*20}, {(bin_idx+1)*20}m)" if bin_idx < 3 else "[60m+)"
+        avg_pts = sum(pts_by_dist[bin_idx]) / len(pts_by_dist[bin_idx])
+        print(f"    {bin_name}: avg_pts={avg_pts:.1f} (n={len(pts_by_dist[bin_idx])})")
