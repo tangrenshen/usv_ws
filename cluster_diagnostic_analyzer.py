@@ -12,7 +12,7 @@ import bisect
 import re
 
 BOAT_LOG_PATH = '/home/lyf040817/usv_ws/boat_log.jsonl'
-CLUSTER_LOG_PATH = '/home/lyf040817/usv_ws/cluster_diagnostics.log'
+CLUSTER_LOG_PATH = '/home/lyf040817/usv_ws/perception_log.log'
 MATCH_TOL = 2.0  
 MAX_TIME_GAP = 0.5  
 FRAME_MATCH_TOL = 0.05  
@@ -74,7 +74,7 @@ assigned_pattern = re.compile(
 
 cluster_frames = {}
 
-with open(CLUSTER_LOG_PATH) as f:
+with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
     current_cluster = None
     for line in f:
         line = line.strip()
@@ -82,21 +82,25 @@ with open(CLUSTER_LOG_PATH) as f:
         if pending_match:
             if current_cluster:
                 cluster_frames.setdefault(current_cluster['t'], []).append(current_cluster)
-            t = float(pending_match.group(1))
-            current_cluster = {
-                't': t,
-                'x': float(pending_match.group(2)),
-                'y': float(pending_match.group(3)),
-                'z': float(pending_match.group(4)),
-                'dx': float(pending_match.group(5)),
-                'dy': float(pending_match.group(6)),
-                'dz': float(pending_match.group(7)),
-                'fp_max': float(pending_match.group(8)),
-                'fp_min': float(pending_match.group(9)),
-                'square': float(pending_match.group(10)),
-                'pts': int(pending_match.group(11)),
-                'label': None
-            }
+            try:
+                t = float(pending_match.group(1))
+                current_cluster = {
+                    't': t,
+                    'x': float(pending_match.group(2)),
+                    'y': float(pending_match.group(3)),
+                    'z': float(pending_match.group(4)),
+                    'dx': float(pending_match.group(5)),
+                    'dy': float(pending_match.group(6)),
+                    'dz': float(pending_match.group(7)),
+                    'fp_max': float(pending_match.group(8)),
+                    'fp_min': float(pending_match.group(9)),
+                    'square': float(pending_match.group(10)),
+                    'pts': int(pending_match.group(11)),
+                    'label': None
+                }
+            except (ValueError, IndexError):
+                current_cluster = None
+                continue
         else:
             assigned_match = assigned_pattern.match(line)
             if assigned_match and current_cluster:
