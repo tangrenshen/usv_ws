@@ -73,6 +73,8 @@ assigned_pattern = re.compile(
 )
 
 cluster_frames = {}
+parse_success = 0
+parse_fail = 0
 
 with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
     current_cluster = None
@@ -98,7 +100,9 @@ with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
                     'pts': int(pending_match.group(11)),
                     'label': None
                 }
+                parse_success += 1
             except (ValueError, IndexError):
+                parse_fail += 1
                 current_cluster = None
                 continue
         else:
@@ -113,6 +117,7 @@ if current_cluster:
 
 cluster_stamps = sorted(cluster_frames.keys())
 print(f"[cluster_diagnostic] 共解析到 {len(cluster_frames)} 帧，{sum(len(c) for c in cluster_frames.values())} 个候选簇")
+print(f"[解析统计] 匹配成功: {parse_success}, 解析失败: {parse_fail}")
 
 missed_gt_details = []
 total_hit = 0
@@ -163,6 +168,7 @@ for det in det_records:
             best_cluster_d = 1e9
             best_cluster_label = None
             best_cluster_fp_max = None
+            best_cluster_dz = None
             best_cluster_pts = None
 
             idx = bisect.bisect_left(cluster_stamps, t)
@@ -181,6 +187,7 @@ for det in det_records:
                         best_cluster = (cx, cy)
                         best_cluster_label = cluster['label']
                         best_cluster_fp_max = cluster['fp_max']
+                        best_cluster_dz = cluster['dz']
                         best_cluster_pts = cluster['pts']
 
             missed_gt_details.append({
@@ -191,6 +198,7 @@ for det in det_records:
                 'closest_cluster_d': best_cluster_d if best_cluster else None,
                 'closest_cluster_label': best_cluster_label,
                 'closest_cluster_fp_max': best_cluster_fp_max,
+                'closest_cluster_dz': best_cluster_dz,
                 'closest_cluster_pts': best_cluster_pts,
                 'has_cluster_candidate': best_cluster_d <= CANDIDATE_SEARCH_RADIUS if best_cluster else False
             })
@@ -243,3 +251,95 @@ if cluster_phase_dists:
         print(f"  在{threshold}m范围内有候选的比例: {count}/{len(cluster_phase_dists)} ({count/len(cluster_phase_dists)*100:.1f}%)")
 else:
     print(f"  无数据(所有漏检都有候选簇)")
+
+print(f"\n=== 漏检真船方位角分桶 ===")
+all_gt_in_boat_frame = []
+for det in det_records:
+    t = det['stamp']
+    odom, odom_gap = find_nearest(odom_stamps, odom_records, t)
+    gt, gt_gap = find_nearest(gt_stamps, gt_records, t)
+    if odom is None or gt is None:
+        continue
+    if odom_gap > MAX_TIME_GAP or gt_gap > MAX_TIME_GAP:
+        continue
+    yaw = quat_to_yaw(odom['qx'], odom['qy'], odom['qz'], odom['qw'])
+    gt_boat_frame = [world_to_boat(p['x'], p['y'], odom['x'], odom['y'], yaw) for p in gt['poses']]
+    for gx, gy in gt_boat_frame:
+        all_gt_in_boat_frame.append((gx, gy))
+
+def get_azimuth(x, y):
+    if x == 0 and y == 0:
+        return 'center'
+    angle = math.atan2(y, x)
+    angle_deg = math.degrees(angle)
+    if -45 <= angle_deg < 45:
+        return 'front'
+    elif 45 <= angle_deg < 135:
+        return 'right'
+    elif angle_deg >= 135 or angle_deg < -135:
+        return 'back'
+    else:
+        return 'left'
+
+all_azimuth_counts = {}
+for gx, gy in all_gt_in_boat_frame:
+    az = get_azimuth(gx, gy)
+    all_azimuth_counts[az] = all_azimuth_counts.get(az, 0) + 1
+
+cluster_phase_azimuth_counts = {}
+classification_phase_azimuth_counts = {}
+for miss in missed_gt_details:
+    az = get_azimuth(miss['gt_x'], miss['gt_y'])
+    if miss['has_cluster_candidate']:
+        classification_phase_azimuth_counts[az] = classification_phase_azimuth_counts.get(az, 0) + 1
+    else:
+        cluster_phase_azimuth_counts[az] = cluster_phase_azimuth_counts.get(az, 0) + 1
+
+print(f"  真值分布(所有真船):")
+for az in ['front', 'right', 'back', 'left']:
+    count = all_azimuth_counts.get(az, 0)
+    percent = count / len(all_gt_in_boat_frame) * 100 if all_gt_in_boat_frame else 0
+    print(f"    {az}: {count} ({percent:.1f}%)")
+
+print(f"  聚类阶段问题漏检分布:")
+for az in ['front', 'right', 'back', 'left']:
+    count = cluster_phase_azimuth_counts.get(az, 0)
+    percent = count / cluster_phase_issue * 100 if cluster_phase_issue > 0 else 0
+    print(f"    {az}: {count} ({percent:.1f}%)")
+
+print(f"  分类阶段问题漏检分布:")
+for az in ['front', 'right', 'back', 'left']:
+    count = classification_phase_azimuth_counts.get(az, 0)
+    percent = count / classification_phase_issue * 100 if classification_phase_issue > 0 else 0
+    print(f"    {az}: {count} ({percent:.1f}%)")
+
+print(f"\n=== buoy误判候选簇特征分布 ===")
+buoy_misses = [m for m in missed_gt_details if m['has_cluster_candidate'] and m['closest_cluster_label'] == 'buoy']
+if buoy_misses:
+    fp_max_vals = [m['closest_cluster_fp_max'] for m in buoy_misses if m['closest_cluster_fp_max'] is not None]
+    dz_vals = [m['closest_cluster_dz'] for m in buoy_misses if m['closest_cluster_dz'] is not None]
+    pts_vals = [m['closest_cluster_pts'] for m in buoy_misses if m['closest_cluster_pts'] is not None]
+    
+    print(f"  样本数: {len(buoy_misses)}")
+    print(f"  fp_max分布:")
+    print(f"    最小: {min(fp_max_vals):.2f}m, 最大: {max(fp_max_vals):.2f}m, 平均: {sum(fp_max_vals)/len(fp_max_vals):.2f}m")
+    for rng in [(0.0, 0.5), (0.5, 0.8), (0.8, 1.0), (1.0, 1.5), (1.5, 2.0)]:
+        cnt = sum(1 for v in fp_max_vals if rng[0] <= v < rng[1])
+        pct = cnt / len(fp_max_vals) * 100 if fp_max_vals else 0
+        print(f"    [{rng[0]:.1f}, {rng[1]:.1f}): {cnt} ({pct:.1f}%)")
+    
+    print(f"  dz分布:")
+    print(f"    最小: {min(dz_vals):.2f}m, 最大: {max(dz_vals):.2f}m, 平均: {sum(dz_vals)/len(dz_vals):.2f}m")
+    for rng in [(0.0, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 3.0)]:
+        cnt = sum(1 for v in dz_vals if rng[0] <= v < rng[1])
+        pct = cnt / len(dz_vals) * 100 if dz_vals else 0
+        print(f"    [{rng[0]:.1f}, {rng[1]:.1f}): {cnt} ({pct:.1f}%)")
+    
+    print(f"  pts分布:")
+    print(f"    最小: {min(pts_vals)}, 最大: {max(pts_vals)}, 平均: {sum(pts_vals)/len(pts_vals):.1f}")
+    for rng in [(0, 20), (20, 50), (50, 100), (100, 200), (200, 500)]:
+        cnt = sum(1 for v in pts_vals if rng[0] <= v < rng[1])
+        pct = cnt / len(pts_vals) * 100 if pts_vals else 0
+        print(f"    [{rng[0]}, {rng[1]}): {cnt} ({pct:.1f}%)")
+else:
+    print(f"  无数据(没有buoy误判)")
