@@ -124,6 +124,10 @@ total_hit = 0
 total_miss = 0
 total_fp = 0
 
+gt_by_dist_bin = {}
+for bin_idx in range(4):
+    gt_by_dist_bin[bin_idx] = {'total': 0, 'hit': 0}
+
 for det in det_records:
     t = det['stamp']
     odom, odom_gap = find_nearest(odom_stamps, odom_records, t)
@@ -152,6 +156,13 @@ for det in det_records:
             total_fp += 1
 
     total_hit += len(matched_gt)
+
+    for i, (gx, gy) in enumerate(gt_boat_frame):
+        dist = math.hypot(gx, gy)
+        bin_idx = min(int(dist // 20), 3)
+        gt_by_dist_bin[bin_idx]['total'] += 1
+        if i in matched_gt:
+            gt_by_dist_bin[bin_idx]['hit'] += 1
 
     for i, (gx, gy) in enumerate(gt_boat_frame):
         if i not in matched_gt:
@@ -344,7 +355,7 @@ if buoy_misses:
 else:
     print(f"  无数据(没有buoy误判)")
 
-print(f"\n=== 漏检真船距离分桶 ===")
+print(f"\n=== 分桶召回率（每桶命中/真值总数）===")
 dist_bins = [(0, 20), (20, 40), (40, 60), (60, 100)]
 dist_counts = {}
 for miss in missed_gt_details:
@@ -354,10 +365,13 @@ for miss in missed_gt_details:
             dist_counts[rng] = dist_counts.get(rng, 0) + 1
             break
 
-for rng in dist_bins:
-    count = dist_counts.get(rng, 0)
-    percent = count / len(missed_gt_details) * 100 if missed_gt_details else 0
-    print(f"  [{rng[0]}, {rng[1]}m): {count} ({percent:.1f}%)")
+for bin_idx, rng in enumerate(dist_bins):
+    miss_count = dist_counts.get(rng, 0)
+    gt_total = gt_by_dist_bin[bin_idx]['total']
+    gt_hit = gt_by_dist_bin[bin_idx]['hit']
+    recall = gt_hit / gt_total * 100 if gt_total > 0 else 0
+    miss_pct_of_total = miss_count / len(missed_gt_details) * 100 if missed_gt_details else 0
+    print(f"  [{rng[0]:>3}, {rng[1]:>3}m): 真值={gt_total:>5} 命中={gt_hit:>4} 漏检={miss_count:>5} 召回率={recall:>5.1f}% (漏检占{miss_pct_of_total:.1f}%)")
 
 print(f"\n=== boat vs pillar同距离点数对比 ===")
 all_cluster_by_label = {}
@@ -386,3 +400,21 @@ for label in ['boat', 'pillar', 'buoy', 'block']:
         bin_name = f"[{bin_idx*20}, {(bin_idx+1)*20}m)" if bin_idx < 3 else "[60m+)"
         avg_pts = sum(pts_by_dist[bin_idx]) / len(pts_by_dist[bin_idx])
         print(f"    {bin_name}: avg_pts={avg_pts:.1f} (n={len(pts_by_dist[bin_idx])})")
+
+print(f"\n=== 近距(0-20m)漏检样本解剖（前10个）===")
+near_misses = []
+for miss in missed_gt_details:
+    dist = math.hypot(miss['gt_x'], miss['gt_y'])
+    if dist < 20:
+        near_misses.append(miss)
+
+print(f"  0-20m漏检总数: {len(near_misses)}")
+for i, m in enumerate(near_misses[:10]):
+    dist = math.hypot(m['gt_x'], m['gt_y'])
+    label = m['closest_cluster_label'] or '无候选'
+    cluster_d = m['closest_cluster_d']
+    fp_max = m['closest_cluster_fp_max']
+    pts = m['closest_cluster_pts']
+    det_d = m['closest_det_d']
+    print(f"  [{i+1}] t={m['t']:.3f}s gt=({m['gt_x']:.2f},{m['gt_y']:.2f}) d={dist:.1f}m")
+    print(f"      最近检测距离={det_d:.2f}m | 最近簇距离={cluster_d:.2f}m 簇label={label} fp_max={fp_max} pts={pts}")
