@@ -15,7 +15,7 @@ run_single_test() {
 
     echo "[3/5] 启动感知节点..."
     source install/setup.bash
-    nohup ros2 run usv_perception perception_node > perception_log.log 2>&1 &
+    nohup ros2 run usv_perception perception_node --ros-args -p use_sim_time:=true > perception_log.log 2>&1 &
     PERCEPTION_PID=$!
     sleep 3
 

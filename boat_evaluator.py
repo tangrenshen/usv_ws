@@ -39,11 +39,28 @@ with open(LOG_PATH) as f:
         elif rec['type'] == 'det':
             det_records.append(rec)
 
+
+_epoch_offset = 0.0
 if gt_records and odom_records:
-    _offset = gt_records[0]['stamp'] - odom_records[0]['stamp']
-    for r in gt_records:
-        r['stamp'] -= _offset
-    print(f"[时间基准校正] gt时间戳偏移量估计: {_offset:.4f}s，已统一到odom/det基准")
+    _epoch_offset = gt_records[0]['stamp'] - odom_records[0]['stamp']
+
+def _align_to_odom(records, odom_records, label, epoch_offset):
+    """det的时间戳可能来自不同时钟域（绝对纪元 vs bag相对时间，取决于
+    main.cpp具体版本用now()还是传感器header.stamp），不能假设它总是需要偏移。
+    但偏移量本身只能用gt估计（gt几乎从t=0就开始记录，起始延迟可忽略）——
+    用records自己的[0]算偏移会把节点启动/标定延迟也算进去，是错的。
+    这里只用一个中位样本判断该序列是否处于"绝对纪元"域，需要的话套用gt估计出的offset。"""
+    if not records or not odom_records:
+        return
+    sample = records[len(records) // 2]['stamp']
+    odom_mid = odom_records[len(odom_records) // 2]['stamp']
+    if abs(sample - odom_mid) > 1000:
+        for r in records:
+            r['stamp'] -= epoch_offset
+        print(f"[时间基准校正] {label}时间戳偏移量估计: {epoch_offset:.4f}s，已统一到odom基准")
+
+_align_to_odom(gt_records, odom_records, "gt", _epoch_offset)
+_align_to_odom(det_records, odom_records, "det", _epoch_offset)
 
 gt_records.sort(key=lambda r: r['stamp'])
 odom_records.sort(key=lambda r: r['stamp'])

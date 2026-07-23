@@ -65,10 +65,11 @@ def world_to_boat(wx, wy, bx, by, yaw):
 def quat_to_yaw(qx, qy, qz, qw):
     return math.atan2(2*(qw*qz+qx*qy), 1-2*(qy*qy+qz*qz))
 
+NUM = r'[-+]?[\d.]+(?:[eE][-+]?\d+)?'
 pending_pattern = re.compile(
-    r'\[cluster_diagnostic\] t=([\d.]+) center=\(([\d.-]+),([\d.-]+),([\d.-]+)\)'
-    r' size=\(([\d.]+),([\d.]+),([\d.]+)\)'
-    r' fp_max=([\d.]+) fp_min=([\d.]+) square=([\d.]+) pts=(\d+) -> classification pending'
+    r'\[cluster_diagnostic\] t=(' + NUM + r') center=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
+    r' size=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
+    r' fp_max=(' + NUM + r') fp_min=(' + NUM + r') square=(' + NUM + r') pts=(\d+) -> classification pending'
 )
 
 cluster_frames = {}
