@@ -18,20 +18,23 @@ import os
 OUT_PATH = '/home/lyf040817/usv_ws/boat_log.jsonl'
 CLUSTER_LOG_PATH = '/home/lyf040817/usv_ws/perception_log.log'
 
+NUM = r'[-+]?[\d.]+(?:[eE][-+]?\d+)?'
 pending_pattern = re.compile(
-    r'\[cluster_diagnostic\] t=([\d.]+) center=\(([\d.-]+),([\d.-]+),([\d.-]+)\)'
-    r' size=\(([\d.]+),([\d.]+),([\d.]+)\)'
-    r' fp_max=([\d.]+) fp_min=([\d.]+) square=([\d.]+) pts=(\d+) -> classification pending'
+    r'\[cluster_diagnostic\] t=(' + NUM + r') center=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
+    r' size=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
+    r' fp_max=(' + NUM + r') fp_min=(' + NUM + r') square=(' + NUM + r') pts=(\d+) -> classification pending'
 )
-assigned_pattern = re.compile(
-    r'\[cluster_diagnostic\] assigned=(\w+)'
-)
+# 成功分类(block/buoy/pillar/boat/*_fallback)打印格式是"t=... -> assigned=X"，assigned=
+# 不在行首；只有discarded_*两条丢弃路径是行首简短格式"[cluster_diagnostic] assigned=X"。
+# 不能锚定行首(.match)，否则所有成功分类的簇都不会被写入'cluster'记录，只有被丢弃的会。
+assigned_pattern = re.compile(r'assigned=(\w+)')
 
 class BoatLogger(Node):
     def __init__(self):
         super().__init__('boat_logger')
         self.f = open(OUT_PATH, 'w')
-        self.count = {'gt': 0, 'gt_pillar': 0, 'gt_buoy': 0, 'gt_block': 0, 'odom': 0, 'det': 0, 'cluster': 0}
+        self.count = {'gt': 0, 'gt_pillar': 0, 'gt_buoy': 0, 'gt_block': 0, 'odom': 0,
+                      'det': 0, 'det_buoy': 0, 'det_pillar': 0, 'det_block': 0, 'cluster': 0}
         self.cluster_frames = {}
         self.last_cluster_pos = 0
 
@@ -44,6 +47,9 @@ class BoatLogger(Node):
         self.create_subscription(PoseArray, '/world/obstacles/blocks', self.on_gt_block, qos)
         self.create_subscription(Odometry, '/wamv/sensors/position/ground_truth_odometry', self.on_odom, qos)
         self.create_subscription(PoseArray, '/world/obstacles/boats_check', self.on_det, qos)
+        self.create_subscription(PoseArray, '/world/obstacles/buoys_check', self.on_det_buoy, qos)
+        self.create_subscription(PoseArray, '/world/obstacles/pillars_check', self.on_det_pillar, qos)
+        self.create_subscription(PoseArray, '/world/obstacles/blocks_check', self.on_det_block, qos)
 
         self.get_logger().info(f"boat_logger 已启动，记录到 {OUT_PATH}")
         self.timer = self.create_timer(3.0, self.report)
@@ -83,6 +89,18 @@ class BoatLogger(Node):
         rec = self._mk(msg); rec['type'] = 'det'
         self.f.write(json.dumps(rec) + '\n'); self.count['det'] += 1
 
+    def on_det_buoy(self, msg):
+        rec = self._mk(msg); rec['type'] = 'det_buoy'
+        self.f.write(json.dumps(rec) + '\n'); self.count['det_buoy'] += 1
+
+    def on_det_pillar(self, msg):
+        rec = self._mk(msg); rec['type'] = 'det_pillar'
+        self.f.write(json.dumps(rec) + '\n'); self.count['det_pillar'] += 1
+
+    def on_det_block(self, msg):
+        rec = self._mk(msg); rec['type'] = 'det_block'
+        self.f.write(json.dumps(rec) + '\n'); self.count['det_block'] += 1
+
     def read_cluster_diagnostic(self):
         if not os.path.exists(CLUSTER_LOG_PATH):
             return
@@ -118,7 +136,7 @@ class BoatLogger(Node):
                             current_cluster = None
                             continue
                     else:
-                        assigned_match = assigned_pattern.match(line)
+                        assigned_match = assigned_pattern.search(line)
                         if assigned_match and current_cluster:
                             current_cluster['label'] = assigned_match.group(1)
                             self.cluster_frames.setdefault(current_cluster['t'], []).append(current_cluster)
@@ -147,7 +165,10 @@ class BoatLogger(Node):
 
     def report(self):
         c = self.count
-        self.get_logger().info(f"已记录: boat={c['gt']} pillar={c['gt_pillar']} buoy={c['gt_buoy']} block={c['gt_block']} odom={c['odom']} det={c['det']} cluster={c['cluster']}")
+        self.get_logger().info(
+            f"已记录: boat={c['gt']} pillar={c['gt_pillar']} buoy={c['gt_buoy']} block={c['gt_block']} "
+            f"odom={c['odom']} det={c['det']} det_buoy={c['det_buoy']} det_pillar={c['det_pillar']} "
+            f"det_block={c['det_block']} cluster={c['cluster']}")
         self.f.flush()
 
 def main():
