@@ -7,7 +7,7 @@ import json
 import math
 import bisect
 
-LOG_PATH = '/tmp/boat_log.jsonl'
+LOG_PATH = '/home/lyf040817/usv_ws/boat_log.jsonl'
 MATCH_TOL = 2.0
 MAX_TIME_GAP = 0.5
 
@@ -67,7 +67,10 @@ for det in det_records:
     print("真值位置(船体系):", [f"({x:.1f},{y:.1f})" for x,y in gt_boat_frame])
 
     for dx, dy in det_pts:
-        best_d = min(math.hypot(dx-gx,dy-gy) for gx,gy in gt_boat_frame)
-        status = "匹配" if best_d < MATCH_TOL else "误检"
-        print(f"  候选({dx:.2f},{dy:.2f}) 最近真值距离={best_d:.2f}m [{status}]")
+        if gt_boat_frame:
+            best_d = min(math.hypot(dx-gx,dy-gy) for gx,gy in gt_boat_frame)
+            status = "匹配" if best_d < MATCH_TOL else "误检"
+            print(f"  候选({dx:.2f},{dy:.2f}) 最近真值距离={best_d:.2f}m [{status}]")
+        else:
+            print(f"  候选({dx:.2f},{dy:.2f}) [无真值可匹配]")
     printed += 1

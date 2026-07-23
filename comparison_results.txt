@@ -1,0 +1,8 @@
+当前代码_recall_median=3.8
+当前代码_fpr_median=94.2
+历史代码_recall_median=12.4
+历史代码_fpr_median=80.6
+当前代码_recall_median=3.5
+当前代码_fpr_median=94.7
+当前代码_recall_median=12.4
+当前代码_fpr_median=80.2

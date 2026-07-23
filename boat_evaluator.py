@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-离线裁判：读取boat_logger.py记录的时间序列，对每条检测(det)按时间戳找最近的
-odom和gt记录做配对，转换到船体系后做位置匹配，输出真正的召回率/误检率/位置误差。
+离线裁判：读取boat_logger.py记录的时间序列，对每条检测(det)按时间戳做真值位置插值，
+转换到船体系后做位置匹配，输出真正的召回率/误检率/位置误差。
+
+核心修复：GT是3Hz（间隔0.33s），检测是10Hz（间隔0.1s），旧版find_nearest用0.05s容差配对，
+导致每3帧漏配2帧。新版对GT做线性时间插值，每个检测帧都能配到精确对齐的真值位置。
 """
 import json
 import math
@@ -47,14 +50,80 @@ odom_records.sort(key=lambda r: r['stamp'])
 gt_stamps = [r['stamp'] for r in gt_records]
 odom_stamps = [r['stamp'] for r in odom_records]
 
-def find_nearest(stamps, records, t):
-    idx = bisect.bisect_left(stamps, t)
-    candidates = []
-    if idx < len(records): candidates.append(records[idx])
-    if idx > 0: candidates.append(records[idx-1])
-    if not candidates: return None, None
-    best = min(candidates, key=lambda r: abs(r['stamp'] - t))
-    return best, abs(best['stamp'] - t)
+def interpolate_odom(t):
+    idx = bisect.bisect_left(odom_stamps, t)
+    if idx == 0:
+        return odom_records[0] if odom_records else None
+    if idx >= len(odom_records):
+        return odom_records[-1] if odom_records else None
+    
+    r0 = odom_records[idx-1]
+    r1 = odom_records[idx]
+    t0, t1 = r0['stamp'], r1['stamp']
+    
+    if abs(t1 - t0) < 1e-9:
+        return r0
+    
+    alpha = (t - t0) / (t1 - t0)
+    
+    def lerp(a, b):
+        return a + (b - a) * alpha
+    
+    return {
+        'stamp': t,
+        'x': lerp(r0['x'], r1['x']),
+        'y': lerp(r0['y'], r1['y']),
+        'z': lerp(r0['z'], r1['z']),
+        'qx': lerp(r0['qx'], r1['qx']),
+        'qy': lerp(r0['qy'], r1['qy']),
+        'qz': lerp(r0['qz'], r1['qz']),
+        'qw': lerp(r0['qw'], r1['qw']),
+    }
+
+def interpolate_gt(t):
+    idx = bisect.bisect_left(gt_stamps, t)
+    if idx == 0:
+        if t <= gt_stamps[0] + MAX_TIME_GAP:
+            return gt_records[0]
+        return None
+    if idx >= len(gt_records):
+        if t >= gt_stamps[-1] - MAX_TIME_GAP:
+            return gt_records[-1]
+        return None
+    
+    r0 = gt_records[idx-1]
+    r1 = gt_records[idx]
+    t0, t1 = r0['stamp'], r1['stamp']
+    
+    if t < t0 - MAX_TIME_GAP or t > t1 + MAX_TIME_GAP:
+        return None
+    
+    poses0 = r0['poses']
+    poses1 = r1['poses']
+    
+    if len(poses0) != len(poses1):
+        if abs(t - t0) < abs(t - t1):
+            return r0
+        else:
+            return r1
+    
+    alpha = (t - t0) / (t1 - t0)
+    
+    def lerp(a, b):
+        return a + (b - a) * alpha
+    
+    interpolated_poses = []
+    for p0, p1 in zip(poses0, poses1):
+        interpolated_poses.append({
+            'x': lerp(p0['x'], p1['x']),
+            'y': lerp(p0['y'], p1['y']),
+            'z': lerp(p0['z'], p1['z']),
+        })
+    
+    return {
+        'stamp': t,
+        'poses': interpolated_poses,
+    }
 
 def world_to_boat(wx, wy, bx, by, yaw):
     dx, dy = wx - bx, wy - by
@@ -71,15 +140,21 @@ def evaluate_segment(name, dets, offset=0.0):
     fp = 0
     errors = []
     skipped = 0
+    gt_not_covered = 0
 
     for det in dets:
         t = det['stamp']
-        odom, odom_gap = find_nearest(odom_stamps, odom_records, t)
-        gt, gt_gap = find_nearest(gt_stamps, gt_records, t)
-        if odom is None or gt is None:
-            continue
-        if odom_gap > MAX_TIME_GAP or gt_gap > MAX_TIME_GAP:
+        odom = interpolate_odom(t)
+        gt = interpolate_gt(t)
+        
+        if odom is None:
             skipped += 1
+            continue
+        
+        if gt is None or len(gt['poses']) == 0:
+            gt_not_covered += 1
+            for p in det['poses']:
+                fp += 1
             continue
 
         yaw = quat_to_yaw(odom['qx'], odom['qy'], odom['qz'], odom['qw'])
@@ -112,7 +187,8 @@ def evaluate_segment(name, dets, offset=0.0):
     err_max = max(errors) if errors else 0
     err_min = min(errors) if errors else 0
 
-    print(f"[{name}] 检测数={len(dets)} 跳过={skipped} 命中={hit} 遗漏={miss} 误检={fp}")
+    print(f"[{name}] 检测数={len(dets)} 跳过={skipped} 真值不覆盖={gt_not_covered}")
+    print(f"[{name}] 命中={hit} 遗漏={miss} 误检={fp}")
     print(f"[{name}] 召回率={recall:.1f}% 误检率={fpr:.1f}%")
     if errors:
         print(f"[{name}] 位置误差: 均值={err_mean:.2f}m 最大={err_max:.2f}m 最小={err_min:.2f}m")
@@ -142,15 +218,21 @@ else:
     total_fp = 0
     all_errors = []
     skipped_stale = 0
+    gt_not_covered = 0
 
     for det in det_records:
         t = det['stamp']
-        odom, odom_gap = find_nearest(odom_stamps, odom_records, t)
-        gt, gt_gap = find_nearest(gt_stamps, gt_records, t)
-        if odom is None or gt is None:
-            continue
-        if odom_gap > MAX_TIME_GAP or gt_gap > MAX_TIME_GAP:
+        odom = interpolate_odom(t)
+        gt = interpolate_gt(t)
+        
+        if odom is None:
             skipped_stale += 1
+            continue
+        
+        if gt is None or len(gt['poses']) == 0:
+            gt_not_covered += 1
+            for p in det['poses']:
+                total_fp += 1
             continue
 
         yaw = quat_to_yaw(odom['qx'], odom['qy'], odom['qz'], odom['qw'])
@@ -175,7 +257,9 @@ else:
         total_hit += len(matched_gt)
         total_miss += (len(gt_boat_frame) - len(matched_gt))
 
-    print(f"检测消息总数: {len(det_records)}  跳过(时间戳间隔过大): {skipped_stale}")
+    print(f"检测消息总数: {len(det_records)}")
+    print(f"跳过(odom不可用): {skipped_stale}")
+    print(f"跳过(真值不覆盖): {gt_not_covered}")
     print(f"真值命中(去重前累加,按帧统计): {total_hit}")
     print(f"真值遗漏(按帧统计): {total_miss}")
     print(f"误检(候选未匹配到任何真值): {total_fp}")

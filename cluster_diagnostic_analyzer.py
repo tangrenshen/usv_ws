@@ -45,14 +45,80 @@ odom_records.sort(key=lambda r: r['stamp'])
 gt_stamps = [r['stamp'] for r in gt_records]
 odom_stamps = [r['stamp'] for r in odom_records]
 
-def find_nearest(stamps, records, t):
-    idx = bisect.bisect_left(stamps, t)
-    candidates = []
-    if idx < len(records): candidates.append(records[idx])
-    if idx > 0: candidates.append(records[idx-1])
-    if not candidates: return None, None
-    best = min(candidates, key=lambda r: abs(r['stamp'] - t))
-    return best, abs(best['stamp'] - t)
+def interpolate_gt(t):
+    idx = bisect.bisect_left(gt_stamps, t)
+    if idx == 0:
+        if t <= gt_stamps[0] + MAX_TIME_GAP:
+            return gt_records[0]
+        return None
+    if idx >= len(gt_records):
+        if t >= gt_stamps[-1] - MAX_TIME_GAP:
+            return gt_records[-1]
+        return None
+    
+    r0 = gt_records[idx-1]
+    r1 = gt_records[idx]
+    t0, t1 = r0['stamp'], r1['stamp']
+    
+    if t < t0 - MAX_TIME_GAP or t > t1 + MAX_TIME_GAP:
+        return None
+    
+    poses0 = r0['poses']
+    poses1 = r1['poses']
+    
+    if len(poses0) != len(poses1):
+        if abs(t - t0) < abs(t - t1):
+            return r0
+        else:
+            return r1
+    
+    alpha = (t - t0) / (t1 - t0)
+    
+    def lerp(a, b):
+        return a + (b - a) * alpha
+    
+    interpolated_poses = []
+    for p0, p1 in zip(poses0, poses1):
+        interpolated_poses.append({
+            'x': lerp(p0['x'], p1['x']),
+            'y': lerp(p0['y'], p1['y']),
+            'z': lerp(p0['z'], p1['z']),
+        })
+    
+    return {
+        'stamp': t,
+        'poses': interpolated_poses,
+    }
+
+def interpolate_odom(t):
+    idx = bisect.bisect_left(odom_stamps, t)
+    if idx == 0:
+        return odom_records[0] if odom_records else None
+    if idx >= len(odom_records):
+        return odom_records[-1] if odom_records else None
+    
+    r0 = odom_records[idx-1]
+    r1 = odom_records[idx]
+    t0, t1 = r0['stamp'], r1['stamp']
+    
+    if abs(t1 - t0) < 1e-9:
+        return r0
+    
+    alpha = (t - t0) / (t1 - t0)
+    
+    def lerp(a, b):
+        return a + (b - a) * alpha
+    
+    return {
+        'stamp': t,
+        'x': lerp(r0['x'], r1['x']),
+        'y': lerp(r0['y'], r1['y']),
+        'z': lerp(r0['z'], r1['z']),
+        'qx': lerp(r0['qx'], r1['qx']),
+        'qy': lerp(r0['qy'], r1['qy']),
+        'qz': lerp(r0['qz'], r1['qz']),
+        'qw': lerp(r0['qw'], r1['qw']),
+    }
 
 def world_to_boat(wx, wy, bx, by, yaw):
     dx, dy = wx - bx, wy - by
@@ -130,11 +196,13 @@ for bin_idx in range(4):
 
 for det in det_records:
     t = det['stamp']
-    odom, odom_gap = find_nearest(odom_stamps, odom_records, t)
-    gt, gt_gap = find_nearest(gt_stamps, gt_records, t)
-    if odom is None or gt is None:
+    odom = interpolate_odom(t)
+    gt = interpolate_gt(t)
+    if odom is None:
         continue
-    if odom_gap > MAX_TIME_GAP or gt_gap > MAX_TIME_GAP:
+    if gt is None or len(gt['poses']) == 0:
+        for p in det['poses']:
+            total_fp += 1
         continue
 
     yaw = quat_to_yaw(odom['qx'], odom['qy'], odom['qz'], odom['qw'])
@@ -267,11 +335,13 @@ print(f"\n=== 漏检真船方位角分桶 ===")
 all_gt_in_boat_frame = []
 for det in det_records:
     t = det['stamp']
-    odom, odom_gap = find_nearest(odom_stamps, odom_records, t)
-    gt, gt_gap = find_nearest(gt_stamps, gt_records, t)
-    if odom is None or gt is None:
+    odom = interpolate_odom(t)
+    gt = interpolate_gt(t)
+    if odom is None:
         continue
-    if odom_gap > MAX_TIME_GAP or gt_gap > MAX_TIME_GAP:
+    if gt is None or len(gt['poses']) == 0:
+        for p in det['poses']:
+            total_fp += 1
         continue
     yaw = quat_to_yaw(odom['qx'], odom['qy'], odom['qz'], odom['qw'])
     gt_boat_frame = [world_to_boat(p['x'], p['y'], odom['x'], odom['y'], yaw) for p in gt['poses']]

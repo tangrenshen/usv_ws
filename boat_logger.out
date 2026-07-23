@@ -1,34 +1,50 @@
-nohup: ignoring input
-[INFO] [1784570991.284437906] [boat_logger]: boat_logger 已启动，记录到 /home/lyf040817/usv_ws/boat_log.jsonl
-[INFO] [1784570994.285064165] [boat_logger]: 已记录: boat=1 pillar=0 buoy=1 block=1 odom=0 det=0
-[INFO] [1784570997.285509239] [boat_logger]: 已记录: boat=10 pillar=3 buoy=10 block=10 odom=0 det=0
-[INFO] [1784571000.285197321] [boat_logger]: 已记录: boat=19 pillar=6 buoy=19 block=19 odom=0 det=0
-[INFO] [1784571003.285181955] [boat_logger]: 已记录: boat=28 pillar=9 buoy=28 block=28 odom=20 det=9
-[INFO] [1784571006.284984381] [boat_logger]: 已记录: boat=37 pillar=12 buoy=37 block=37 odom=72 det=36
-[INFO] [1784571009.285139696] [boat_logger]: 已记录: boat=46 pillar=15 buoy=46 block=46 odom=134 det=60
-[INFO] [1784571012.285020102] [boat_logger]: 已记录: boat=55 pillar=18 buoy=55 block=55 odom=190 det=84
-[INFO] [1784571015.285158487] [boat_logger]: 已记录: boat=64 pillar=21 buoy=64 block=64 odom=246 det=110
-[INFO] [1784571018.285127729] [boat_logger]: 已记录: boat=73 pillar=24 buoy=73 block=73 odom=300 det=139
-[INFO] [1784571021.285057693] [boat_logger]: 已记录: boat=82 pillar=27 buoy=82 block=82 odom=360 det=166
-[INFO] [1784571024.284990252] [boat_logger]: 已记录: boat=91 pillar=30 buoy=91 block=91 odom=416 det=195
-[INFO] [1784571027.285130512] [boat_logger]: 已记录: boat=100 pillar=33 buoy=100 block=100 odom=472 det=224
-[INFO] [1784571030.284930419] [boat_logger]: 已记录: boat=109 pillar=36 buoy=109 block=109 odom=530 det=253
-[INFO] [1784571033.285152062] [boat_logger]: 已记录: boat=118 pillar=39 buoy=118 block=118 odom=586 det=281
-[INFO] [1784571036.284976683] [boat_logger]: 已记录: boat=127 pillar=42 buoy=127 block=127 odom=644 det=305
-[INFO] [1784571039.285266158] [boat_logger]: 已记录: boat=136 pillar=45 buoy=136 block=136 odom=700 det=331
-[INFO] [1784571042.285031844] [boat_logger]: 已记录: boat=145 pillar=48 buoy=145 block=145 odom=758 det=355
-[INFO] [1784571045.285059162] [boat_logger]: 已记录: boat=154 pillar=51 buoy=154 block=154 odom=816 det=379
-[INFO] [1784571048.285002918] [boat_logger]: 已记录: boat=163 pillar=54 buoy=163 block=163 odom=872 det=403
-[INFO] [1784571051.285104618] [boat_logger]: 已记录: boat=172 pillar=57 buoy=172 block=172 odom=930 det=432
-[INFO] [1784571054.285040810] [boat_logger]: 已记录: boat=181 pillar=60 buoy=181 block=181 odom=986 det=460
-[INFO] [1784571057.285028800] [boat_logger]: 已记录: boat=190 pillar=63 buoy=190 block=190 odom=1044 det=488
-[INFO] [1784571060.285028402] [boat_logger]: 已记录: boat=199 pillar=66 buoy=199 block=199 odom=1100 det=516
-[INFO] [1784571063.285058824] [boat_logger]: 已记录: boat=208 pillar=69 buoy=208 block=208 odom=1158 det=546
-[INFO] [1784571066.285034355] [boat_logger]: 已记录: boat=217 pillar=72 buoy=217 block=217 odom=1214 det=571
-[INFO] [1784571069.285155736] [boat_logger]: 已记录: boat=226 pillar=75 buoy=226 block=226 odom=1272 det=591
-[INFO] [1784571072.285123411] [boat_logger]: 已记录: boat=235 pillar=78 buoy=235 block=235 odom=1328 det=613
-[INFO] [1784571075.285145445] [boat_logger]: 已记录: boat=244 pillar=81 buoy=244 block=244 odom=1386 det=636
-[INFO] [1784571078.285181275] [boat_logger]: 已记录: boat=253 pillar=84 buoy=253 block=253 odom=1444 det=655
-[INFO] [1784571081.285028685] [boat_logger]: 已记录: boat=258 pillar=86 buoy=258 block=258 odom=1476 det=681
-[INFO] [1784571084.285653735] [boat_logger]: 已记录: boat=258 pillar=86 buoy=258 block=258 odom=1476 det=711
-[INFO] [1784571087.284962328] [boat_logger]: 已记录: boat=258 pillar=86 buoy=258 block=258 odom=1476 det=741
+[INFO] [1784772883.553409296] [boat_logger]: boat_logger 已启动，记录到 /home/lyf040817/usv_ws/boat_log.jsonl
+[INFO] [1784772886.554120504] [boat_logger]: 已记录: boat=2 pillar=0 buoy=2 block=2 odom=0 det=0 cluster=0
+[INFO] [1784772889.554222288] [boat_logger]: 已记录: boat=11 pillar=3 buoy=11 block=11 odom=0 det=0 cluster=0
+[INFO] [1784772892.554131824] [boat_logger]: 已记录: boat=20 pillar=6 buoy=20 block=20 odom=0 det=0 cluster=0
+[INFO] [1784772895.554070152] [boat_logger]: 已记录: boat=29 pillar=9 buoy=29 block=29 odom=28 det=13 cluster=335
+[INFO] [1784772898.553991918] [boat_logger]: 已记录: boat=40 pillar=13 buoy=40 block=40 odom=94 det=48 cluster=1787
+[INFO] [1784772901.554040046] [boat_logger]: 已记录: boat=49 pillar=16 buoy=49 block=49 odom=150 det=78 cluster=3001
+[INFO] [1784772904.554080475] [boat_logger]: 已记录: boat=58 pillar=19 buoy=58 block=58 odom=206 det=108 cluster=4264
+[INFO] [1784772907.554087587] [boat_logger]: 已记录: boat=67 pillar=22 buoy=67 block=67 odom=262 det=138 cluster=5492
+[INFO] [1784772910.553945852] [boat_logger]: 已记录: boat=76 pillar=25 buoy=76 block=76 odom=320 det=168 cluster=6697
+[INFO] [1784772913.555015457] [boat_logger]: 已记录: boat=85 pillar=28 buoy=85 block=85 odom=376 det=198 cluster=7894
+[INFO] [1784772916.554057928] [boat_logger]: 已记录: boat=94 pillar=31 buoy=94 block=94 odom=434 det=228 cluster=9142
+[INFO] [1784772919.554304248] [boat_logger]: 已记录: boat=103 pillar=34 buoy=103 block=103 odom=488 det=258 cluster=10396
+[INFO] [1784772922.554268954] [boat_logger]: 已记录: boat=112 pillar=37 buoy=112 block=112 odom=546 det=288 cluster=11672
+[INFO] [1784772925.554098574] [boat_logger]: 已记录: boat=121 pillar=40 buoy=121 block=121 odom=602 det=318 cluster=12920
+[INFO] [1784772928.554003814] [boat_logger]: 已记录: boat=130 pillar=43 buoy=130 block=130 odom=660 det=348 cluster=13990
+[INFO] [1784772931.554044212] [boat_logger]: 已记录: boat=140 pillar=46 buoy=140 block=140 odom=726 det=383 cluster=15360
+[INFO] [1784772934.554368870] [boat_logger]: 已记录: boat=149 pillar=49 buoy=149 block=149 odom=784 det=413 cluster=16682
+[INFO] [1784772937.554105566] [boat_logger]: 已记录: boat=158 pillar=52 buoy=158 block=158 odom=840 det=443 cluster=17926
+[INFO] [1784772940.554157036] [boat_logger]: 已记录: boat=167 pillar=55 buoy=167 block=167 odom=898 det=473 cluster=19101
+[INFO] [1784772943.554024174] [boat_logger]: 已记录: boat=176 pillar=58 buoy=176 block=176 odom=956 det=503 cluster=20384
+[INFO] [1784772946.553998078] [boat_logger]: 已记录: boat=185 pillar=61 buoy=185 block=185 odom=1014 det=533 cluster=21595
+[INFO] [1784772949.554990752] [boat_logger]: 已记录: boat=194 pillar=64 buoy=194 block=194 odom=1070 det=563 cluster=22523
+[INFO] [1784772952.554087024] [boat_logger]: 已记录: boat=203 pillar=67 buoy=203 block=203 odom=1126 det=593 cluster=23395
+[INFO] [1784772955.554129356] [boat_logger]: 已记录: boat=212 pillar=70 buoy=212 block=212 odom=1184 det=623 cluster=24210
+[INFO] [1784772958.554249963] [boat_logger]: 已记录: boat=221 pillar=73 buoy=221 block=221 odom=1240 det=653 cluster=25086
+[INFO] [1784772961.553993933] [boat_logger]: 已记录: boat=230 pillar=76 buoy=230 block=230 odom=1298 det=683 cluster=25995
+[INFO] [1784772964.553961800] [boat_logger]: 已记录: boat=241 pillar=80 buoy=241 block=241 odom=1364 det=718 cluster=26900
+[INFO] [1784772967.554035388] [boat_logger]: 已记录: boat=250 pillar=83 buoy=250 block=250 odom=1422 det=748 cluster=27698
+[INFO] [1784772970.554036920] [boat_logger]: 已记录: boat=258 pillar=86 buoy=258 block=258 odom=1476 det=778 cluster=28548
+[INFO] [1784772973.554029302] [boat_logger]: 已记录: boat=258 pillar=86 buoy=258 block=258 odom=1476 det=808 cluster=29334
+[INFO] [1784772976.554229443] [boat_logger]: 已记录: boat=258 pillar=86 buoy=258 block=258 odom=1476 det=838 cluster=30114
+Traceback (most recent call last):
+  File "/home/lyf040817/usv_ws/boat_logger.py", line 165, in <module>
+    main()
+  File "/home/lyf040817/usv_ws/boat_logger.py", line 157, in main
+    rclpy.spin(node)
+  File "/opt/ros/jazzy/lib/python3.12/site-packages/rclpy/__init__.py", line 247, in spin
+    executor.spin_once()
+  File "/opt/ros/jazzy/lib/python3.12/site-packages/rclpy/executors.py", line 926, in spin_once
+    self._spin_once_impl(timeout_sec)
+  File "/opt/ros/jazzy/lib/python3.12/site-packages/rclpy/executors.py", line 907, in _spin_once_impl
+    handler, entity, node = self.wait_for_ready_callbacks(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/ros/jazzy/lib/python3.12/site-packages/rclpy/executors.py", line 877, in wait_for_ready_callbacks
+    return next(self._cb_iter)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/opt/ros/jazzy/lib/python3.12/site-packages/rclpy/executors.py", line 785, in _wait_for_ready_callbacks
+    raise ExternalShutdownException()
+rclpy.executors.ExternalShutdownException
