@@ -35,11 +35,27 @@ with open(BOAT_LOG_PATH) as f:
 
 print(f"boat_log: gt={len(gt_records)} odom={len(odom_records)} det={len(det_records)}")
 
+_epoch_offset = 0.0
 if gt_records and odom_records:
-    _offset = gt_records[0]['stamp'] - odom_records[0]['stamp']
-    for r in gt_records:
-        r['stamp'] -= _offset
-    print(f"[时间基准校正] gt时间戳偏移量估计: {_offset:.4f}s")
+    _epoch_offset = gt_records[0]['stamp'] - odom_records[0]['stamp']
+
+def _align_to_odom(records, odom_records, label, epoch_offset):
+    """det的时钟域取决于main.cpp具体版本（now()绝对纪元 vs 传感器header.stamp
+    的bag相对时间），不能假设它和gt同一个偏移量。偏移量只能用gt估计（gt几乎从
+    t=0就有记录，起始延迟可忽略），det只用中位数样本判断是否需要套用这个偏移。
+    与boat_evaluator.py的_align_to_odom保持同一套逻辑，避免两处各自实现、
+    各自出错。"""
+    if not records or not odom_records:
+        return
+    sample = records[len(records) // 2]['stamp']
+    odom_mid = odom_records[len(odom_records) // 2]['stamp']
+    if abs(sample - odom_mid) > 1000:
+        for r in records:
+            r['stamp'] -= epoch_offset
+        print(f"[时间基准校正] {label}时间戳偏移量估计: {epoch_offset:.4f}s，已统一到odom基准")
+
+_align_to_odom(gt_records, odom_records, "gt", _epoch_offset)
+_align_to_odom(det_records, odom_records, "det", _epoch_offset)
 
 gt_records.sort(key=lambda r: r['stamp'])
 odom_records.sort(key=lambda r: r['stamp'])
@@ -72,7 +88,13 @@ pending_pattern = re.compile(
     r' fp_max=(' + NUM + r') fp_min=(' + NUM + r') square=(' + NUM + r') pts=(\d+) -> classification pending'
 )
 
-cluster_frames = {}
+# cluster_diagnostic的t=来自和det相同的sensor_stamp_sec/now()来源，可能和det一样
+# 处于绝对纪元域（需要套epoch_offset）也可能已经在odom相对域（main.cpp换成用传感器
+# header.stamp的版本），不能硬编码"总是减offset"——第一遍只解析原始值，用中位数样本
+# 判断这批时间戳整体上是否需要平移，第二遍再real构建cluster_frames，顺带滤掉明显损坏
+# 的离群值（多线程并发写std::cout导致的字符级数据损坏，比如"61782954238"这种被多插入
+# 一位数字的值）。
+_raw_clusters = []
 with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
     current_cluster = None
     for line in f:
@@ -80,11 +102,10 @@ with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
         pending_match = pending_pattern.match(line)
         if pending_match:
             if current_cluster:
-                cluster_frames.setdefault(current_cluster['t'], []).append(current_cluster)
+                _raw_clusters.append(current_cluster)
             try:
-                t = float(pending_match.group(1))
                 current_cluster = {
-                    't': t,
+                    't': float(pending_match.group(1)),
                     'x': float(pending_match.group(2)),
                     'y': float(pending_match.group(3)),
                     'z': float(pending_match.group(4)),
@@ -104,8 +125,29 @@ with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
             assigned_match = re.match(r'\[cluster_diagnostic\] assigned=(\w+)', line)
             if assigned_match and current_cluster:
                 current_cluster['label'] = assigned_match.group(1)
-                cluster_frames.setdefault(current_cluster['t'], []).append(current_cluster)
-                current_cluster = None
+    if current_cluster:
+        _raw_clusters.append(current_cluster)
+
+_cluster_sample = _raw_clusters[len(_raw_clusters) // 2]['t'] if _raw_clusters else 0.0
+_odom_mid = odom_stamps[len(odom_stamps) // 2]
+_needs_shift = abs(_cluster_sample - _odom_mid) > 1000
+if _needs_shift:
+    print(f"[时间基准校正] cluster_diagnostic时间戳偏移量估计: {_epoch_offset:.4f}s，已统一到odom基准")
+
+_expected_lo = odom_stamps[0] - 200
+_expected_hi = odom_stamps[-1] + 200
+
+cluster_frames = {}
+_dropped_outliers = 0
+for c in _raw_clusters:
+    t = (c['t'] - _epoch_offset) if _needs_shift else c['t']
+    if not (_expected_lo <= t <= _expected_hi):
+        _dropped_outliers += 1
+        continue
+    c['t'] = t
+    cluster_frames.setdefault(t, []).append(c)
+if _dropped_outliers:
+    print(f"[数据质量] 丢弃{_dropped_outliers}条明显损坏的cluster_diagnostic离群值（并发写std::cout导致的字符级数据损坏）")
 
 cluster_stamps = sorted(cluster_frames.keys())
 print(f"\ncluster_diagnostic: {len(cluster_frames)}帧, {sum(len(c) for c in cluster_frames.values())}个候选簇")
