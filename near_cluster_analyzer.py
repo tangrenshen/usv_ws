@@ -62,9 +62,10 @@ pending_pattern = re.compile(
     r' size=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
     r' fp_max=(' + NUM + r') fp_min=(' + NUM + r') square=(' + NUM + r') pts=(\d+) -> classification pending'
 )
-assigned_pattern = re.compile(
-    r'\[cluster_diagnostic\] assigned=(\w+)'
-)
+# 成功分类(block/buoy/pillar/boat/*_fallback)打印格式是"t=... -> assigned=X"，assigned=
+# 不在行首；只有discarded_*两条丢弃路径是行首简短格式。不能锚定行首(.match)，否则所有
+# 成功分类的label全部丢失、被误记成None。
+assigned_pattern = re.compile(r'assigned=(\w+)')
 
 all_clusters = []
 with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
@@ -95,7 +96,7 @@ with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
                 current_cluster = None
                 continue
         else:
-            assigned_match = assigned_pattern.match(line)
+            assigned_match = assigned_pattern.search(line)
             if assigned_match and current_cluster:
                 current_cluster['label'] = assigned_match.group(1)
                 all_clusters.append(current_cluster)

@@ -122,7 +122,13 @@ with open(CLUSTER_LOG_PATH, encoding='utf-8', errors='replace') as f:
                 current_cluster = None
                 continue
         else:
-            assigned_match = re.match(r'\[cluster_diagnostic\] assigned=(\w+)', line)
+            # 成功分类(block/buoy/pillar/boat/*_fallback)的打印格式是
+            # "[cluster_diagnostic] t=... -> assigned=X"，assigned=在行尾，不在行首；
+            # 只有discarded_low_confidence/discarded_shape_implausible两条丢弃路径是
+            # "[cluster_diagnostic] assigned=X"这种assigned=在行首的简短格式。
+            # 之前用re.match锚定行首，只认得出后者，导致所有成功分类的簇label全部
+            # 丢失、被误记成None("unknown")——不是真实算法行为，是解析漏了。
+            assigned_match = re.search(r'assigned=(\w+)', line)
             if assigned_match and current_cluster:
                 current_cluster['label'] = assigned_match.group(1)
     if current_cluster:
