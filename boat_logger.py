@@ -15,14 +15,17 @@ import json
 import re
 import os
 
-OUT_PATH = '/home/lyf040817/usv_ws/boat_log.jsonl'
-CLUSTER_LOG_PATH = '/home/lyf040817/usv_ws/perception_log.log'
+OUT_PATH = os.environ.get(
+    'BOAT_LOG_PATH', '/home/lyf040817/usv_ws/boat_log.jsonl')
+CLUSTER_LOG_PATH = os.environ.get(
+    'CLUSTER_LOG_PATH', '/home/lyf040817/usv_ws/perception_log.log')
 
 NUM = r'[-+]?[\d.]+(?:[eE][-+]?\d+)?'
 pending_pattern = re.compile(
     r'\[cluster_diagnostic\] t=(' + NUM + r') center=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
     r' size=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
-    r' fp_max=(' + NUM + r') fp_min=(' + NUM + r') square=(' + NUM + r') pts=(\d+) -> classification pending'
+    r' fp_max=(' + NUM + r') fp_min=(' + NUM + r') square=(' + NUM + r') pts=(\d+)'
+    r'(?: measurement_t=(' + NUM + r'))? -> classification pending'
 )
 # 成功分类(block/buoy/pillar/boat/*_fallback)打印格式是"t=... -> assigned=X"，assigned=
 # 不在行首；只有discarded_*两条丢弃路径是行首简短格式"[cluster_diagnostic] assigned=X"。
@@ -130,6 +133,11 @@ class BoatLogger(Node):
                                 'fp_min': float(pending_match.group(9)),
                                 'square': float(pending_match.group(10)),
                                 'pts': int(pending_match.group(11)),
+                                'measurement_t': (
+                                    float(pending_match.group(12))
+                                    if pending_match.group(12) is not None
+                                    else None
+                                ),
                                 'label': None
                             }
                         except (ValueError, IndexError):
@@ -153,6 +161,7 @@ class BoatLogger(Node):
                                 'fp_min': current_cluster['fp_min'],
                                 'square': current_cluster['square'],
                                 'pts': current_cluster['pts'],
+                                'measurement_t': current_cluster['measurement_t'],
                                 'label': current_cluster['label']
                             }
                             self.f.write(json.dumps(rec) + '\n')

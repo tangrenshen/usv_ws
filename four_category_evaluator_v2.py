@@ -133,9 +133,9 @@ def make_odom_interpolator(records):
             return None
         index = bisect.bisect_left(stamps, t)
         if index == 0:
-            return records[0] if t <= stamps[0] + MAX_TIME_GAP else None
+            return records[0] if t >= stamps[0] - MAX_TIME_GAP else None
         if index >= len(records):
-            return records[-1] if t >= stamps[-1] - MAX_TIME_GAP else None
+            return records[-1] if t <= stamps[-1] + MAX_TIME_GAP else None
         left, right = records[index - 1], records[index]
         dt = right["stamp"] - left["stamp"]
         if abs(dt) < 1e-9:
@@ -158,9 +158,9 @@ def make_gt_interpolator(records):
             return None
         index = bisect.bisect_left(stamps, t)
         if index == 0:
-            return records[0] if t <= stamps[0] + MAX_TIME_GAP else None
+            return records[0] if t >= stamps[0] - MAX_TIME_GAP else None
         if index >= len(records):
-            return records[-1] if t >= stamps[-1] - MAX_TIME_GAP else None
+            return records[-1] if t <= stamps[-1] + MAX_TIME_GAP else None
         left, right = records[index - 1], records[index]
         if t < left["stamp"] - MAX_TIME_GAP or t > right["stamp"] + MAX_TIME_GAP:
             return None
