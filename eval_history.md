@@ -2382,3 +2382,41 @@ y_half:        2.75(当前默认)   3.5      4.0      4.5
 - 整图比对口径 → 改自遮挡区填充方式（水面色/相邻信息补），而不是调半径
 
 两者都还没实现，等口径确认后再投入哪一个。**评分口径的确认，价值现在明确到能直接决定往哪个方向投入**——建议走正常渠道直接问赛会，比在这里继续猜测可靠。
+
+## 合规性核查（2026-08-21）：找到并拆除一个和BoatTracker同款的odom地雷
+
+BEV/pillar/block/buoy等精度线全部收尾后，转向合规性核查——理由是"框架不符合比赛现场约束是零分，精度不够只是分低"，性质不同，值得单独查一轮。
+
+### grep清查odom残留依赖
+
+```bash
+grep -rn "odom" src/usv_perception/src/ src/usv_perception/include/
+```
+
+**没有发现阻塞式等待逻辑**（无`wait_for`/`spin_until`/同步等odom到达的代码），任何odom缺失场景都是优雅降级，不会导致节点卡死或崩溃。节点本身只订阅image/lidar/odom三路话题，没有订阅任何GT话题（只发布`_check`系列），符合"比测只发布7路点云+6路图像"的约束。
+
+**但找到一处真实隐患**：`CandidateTemporalClassifier`（main.cpp:786-806）在`update()`里需要odom_x/odom_y/odom_yaw做boat→world坐标转换，`odom_valid`为false时优雅降级到`reset()`——**这和BoatTracker修复前的坑是同一个模式**：比测现场没有odom，`odom_valid`会永远是false，这个功能会在比测时完全失效，且不报错、不提示，"开着但从没真正跑过"。
+
+**风险评估**：`candidate_temporal_enabled`默认值是`false`（`declare_parameter<bool>("candidate_temporal_enabled", false)`），当前默认配置下这条路径根本不执行，不构成活跃的合规问题。但只要有人为提升召回率打开这个开关、又没意识到odom依赖没修，就会复现"改了但从没真正跑过"的坑。
+
+### 拆除决策：现在拆，不记入清单
+
+**理由**：BoatTracker当初的坑，成因就是"先实现、odom依赖以后再说"——中间隔了时间，回来时没人记得这个依赖，直接打开就用，跑出假数字，又花好几轮才拆解出"它从来没运行过"。清单不能防止这类问题（打开开关的人未必先读清单），**代码改对了才不需要任何人记得**。而且修法是已知配方（`CandidateTemporalClassifier`自己的base_link A/B就是BoatTracker那次同一批数据做的：世界系21.40% vs base_link系21.40%，误检仅+0.03pp），成本极低，不是引入新的未知。
+
+另外，这类问题和端到端合规演练是互补而非替代关系——**默认关闭的功能，演练根本不会触发这条代码路径，演练会给出"一切正常"的结论，而地雷还在**。这类"默认关闭功能里藏着的合规问题"只能靠代码审查发现，是端到端测试的盲区，值得先做完代码审查、拆完已知地雷，再进演练。
+
+### 修复：和BoatTracker完全同款的手法
+
+移除`update()`的`odom_x/odom_y/odom_yaw`三个参数，内部不再做boat<->world坐标转换，直接在base_link系维护候选轨迹。加了`updateCount()`/`resetCount()`诊断（同BoatTracker的证明-真的在跑套路），验证：开启`candidate_temporal_enabled:=true`跑20秒bag段，`updates=84 resets=0`，`promoted`从0涨到12——确认真实运行，不是又一次"看起来改对了、实际没跑过"。默认值维持`false`不变，这次只是拆地雷，不改变当前默认行为。
+
+**扩大grep范围排查同类模式**（"依赖比测不存在的输入 + 默认关闭"的组合）：
+
+```bash
+grep -rn "_valid\|_enabled" src/usv_perception/src/ | grep -i "odom\|gt\|truth"
+```
+
+只命中`CandidateTemporalClassifier`那一处（已修复）。没有发现第二个同类实例。
+
+### 待办：端到端合规演练
+
+代码审查这一步已经完成（grep→拆地雷）。下一步是端到端合规演练——只发布7路点云+6路图像（过滤掉GT/odom/overhead_camera）、外参注入扰动、实时回放不降速，检查节点能否正常启动、四个话题频率是否正常、有无隐藏依赖导致的崩溃或卡死，并记录各分支耗时的P50/P95/max（不只是平均值，避免P99尖峰在评测机上超周期而不自知）。演练验证的应是"拆完已知地雷之后"的状态，顺序上晚于代码审查是对的。
