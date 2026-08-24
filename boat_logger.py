@@ -9,6 +9,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import PoseArray
+from visualization_msgs.msg import MarkerArray, Marker
 from nav_msgs.msg import Odometry
 from tf2_msgs.msg import TFMessage
 import json
@@ -25,6 +26,7 @@ pending_pattern = re.compile(
     r'\[cluster_diagnostic\] t=(' + NUM + r') center=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
     r' size=\((' + NUM + r'),(' + NUM + r'),(' + NUM + r')\)'
     r' fp_max=(' + NUM + r') fp_min=(' + NUM + r') square=(' + NUM + r') pts=(\d+)'
+    r'(?: forward_pts=(\d+) forward_ratio=(' + NUM + r'))?'
     r'(?: measurement_t=(' + NUM + r'))? -> classification pending'
 )
 # 成功分类(block/buoy/pillar/boat/*_fallback)打印格式是"t=... -> assigned=X"，assigned=
@@ -49,10 +51,10 @@ class BoatLogger(Node):
         self.create_subscription(PoseArray, '/world/obstacles/buoys', self.on_gt_buoy, qos)
         self.create_subscription(PoseArray, '/world/obstacles/blocks', self.on_gt_block, qos)
         self.create_subscription(Odometry, '/wamv/sensors/position/ground_truth_odometry', self.on_odom, qos)
-        self.create_subscription(PoseArray, '/world/obstacles/boats_check', self.on_det, qos)
-        self.create_subscription(PoseArray, '/world/obstacles/buoys_check', self.on_det_buoy, qos)
-        self.create_subscription(PoseArray, '/world/obstacles/pillars_check', self.on_det_pillar, qos)
-        self.create_subscription(PoseArray, '/world/obstacles/blocks_check', self.on_det_block, qos)
+        self.create_subscription(MarkerArray, '/world/obstacles/boats_check', self.on_det, qos)
+        self.create_subscription(MarkerArray, '/world/obstacles/buoys_check', self.on_det_buoy, qos)
+        self.create_subscription(MarkerArray, '/world/obstacles/pillars_check', self.on_det_pillar, qos)
+        self.create_subscription(MarkerArray, '/world/obstacles/blocks_check', self.on_det_block, qos)
 
         self.get_logger().info(f"boat_logger 已启动，记录到 {OUT_PATH}")
         self.timer = self.create_timer(3.0, self.report)
@@ -64,6 +66,22 @@ class BoatLogger(Node):
     def _mk(self, msg):
         return {'stamp': self.stamp_sec(msg.header),
                 'poses': [{'x': p.position.x, 'y': p.position.y, 'z': p.position.z} for p in msg.poses]}
+
+    def _mk_markers(self, msg):
+        # *_check话题2026-08-24改用MarkerArray（赛会口径变更，PoseArray->MarkerArray，
+        # 携带长宽高）。每帧先发一个DELETEALL(action=3)清空上一帧的marker，只有
+        # action=ADD(0)的才是真实目标，stamp取第一个真实marker的（DELETEALL用的是
+        # 同一帧的stamp，没有真实marker时才退化到用DELETEALL自己的stamp）。
+        adds = [m for m in msg.markers if m.action == Marker.ADD]
+        # MarkerArray本身没有header，取任意一个marker的（同一帧发布的所有marker
+        # stamp都相同）；理论上msg.markers不会为空，因为我们的发布端总是先塞一个
+        # DELETEALL，这里仍加个防御分支避免极端情况下崩溃。
+        stamp_src = (adds[0] if adds else msg.markers[0]).header if msg.markers else None
+        if stamp_src is None:
+            return {'stamp': self.get_clock().now().nanoseconds * 1e-9, 'poses': []}
+        return {'stamp': self.stamp_sec(stamp_src),
+                'poses': [{'x': m.pose.position.x, 'y': m.pose.position.y, 'z': m.pose.position.z,
+                           'dx': m.scale.x, 'dy': m.scale.y, 'dz': m.scale.z} for m in adds]}
 
     def on_gt(self, msg):
         rec = self._mk(msg); rec['type'] = 'gt'
@@ -89,19 +107,19 @@ class BoatLogger(Node):
         self.f.write(json.dumps(rec) + '\n'); self.count['odom'] += 1
 
     def on_det(self, msg):
-        rec = self._mk(msg); rec['type'] = 'det'
+        rec = self._mk_markers(msg); rec['type'] = 'det'
         self.f.write(json.dumps(rec) + '\n'); self.count['det'] += 1
 
     def on_det_buoy(self, msg):
-        rec = self._mk(msg); rec['type'] = 'det_buoy'
+        rec = self._mk_markers(msg); rec['type'] = 'det_buoy'
         self.f.write(json.dumps(rec) + '\n'); self.count['det_buoy'] += 1
 
     def on_det_pillar(self, msg):
-        rec = self._mk(msg); rec['type'] = 'det_pillar'
+        rec = self._mk_markers(msg); rec['type'] = 'det_pillar'
         self.f.write(json.dumps(rec) + '\n'); self.count['det_pillar'] += 1
 
     def on_det_block(self, msg):
-        rec = self._mk(msg); rec['type'] = 'det_block'
+        rec = self._mk_markers(msg); rec['type'] = 'det_block'
         self.f.write(json.dumps(rec) + '\n'); self.count['det_block'] += 1
 
     def read_cluster_diagnostic(self):
@@ -133,9 +151,19 @@ class BoatLogger(Node):
                                 'fp_min': float(pending_match.group(9)),
                                 'square': float(pending_match.group(10)),
                                 'pts': int(pending_match.group(11)),
-                                'measurement_t': (
-                                    float(pending_match.group(12))
+                                'forward_pts': (
+                                    int(pending_match.group(12))
                                     if pending_match.group(12) is not None
+                                    else None
+                                ),
+                                'forward_ratio': (
+                                    float(pending_match.group(13))
+                                    if pending_match.group(13) is not None
+                                    else None
+                                ),
+                                'measurement_t': (
+                                    float(pending_match.group(14))
+                                    if pending_match.group(14) is not None
                                     else None
                                 ),
                                 'label': None
@@ -161,6 +189,8 @@ class BoatLogger(Node):
                                 'fp_min': current_cluster['fp_min'],
                                 'square': current_cluster['square'],
                                 'pts': current_cluster['pts'],
+                                'forward_pts': current_cluster['forward_pts'],
+                                'forward_ratio': current_cluster['forward_ratio'],
                                 'measurement_t': current_cluster['measurement_t'],
                                 'label': current_cluster['label']
                             }
