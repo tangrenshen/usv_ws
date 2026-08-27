@@ -35,11 +35,16 @@ odom_records.sort(key=lambda r: r['stamp'])
 odom_stamps = [r['stamp'] for r in odom_records]
 
 def interpolate_odom(t):
+    # 越界钳制到首/末已知位姿是有害的静默行为：2026-07-24发现odom比gt早停约9秒，
+    # 钳制会让这9秒里的每一帧都用同一个冻结位姿去做world_to_boat变换，产生系统性
+    # 错误坐标，污染四个类别的评估——而且不报错、不跳过，混在总账里很难发现。
+    # 改成和interpolate_gt一致的边界处理：超出MAX_TIME_GAP容差直接返回None，
+    # 让调用方按"真值不覆盖"处理并从统计里排除，而不是拿一个虚构的位姿继续算。
     idx = bisect.bisect_left(odom_stamps, t)
     if idx == 0:
-        return odom_records[0] if odom_records else None
+        return odom_records[0] if (odom_records and t <= odom_stamps[0] + MAX_TIME_GAP) else None
     if idx >= len(odom_records):
-        return odom_records[-1] if odom_records else None
+        return odom_records[-1] if (odom_records and t >= odom_stamps[-1] - MAX_TIME_GAP) else None
     r0, r1 = odom_records[idx-1], odom_records[idx]
     t0, t1 = r0['stamp'], r1['stamp']
     if abs(t1 - t0) < 1e-9:
@@ -162,12 +167,15 @@ def evaluate(name, gt_key, det_key):
     fpr = fp/det_total*100 if det_total > 0 else 0
     err_mean = sum(errors)/len(errors) if errors else 0
 
+    covered_frames = len(det_records) - skipped
     print(f"\n=== [{name}] ===")
     print(f"检测消息总数={len(det_records)} 跳过(odom不可用)={skipped} 跳过(真值不覆盖)={gt_not_covered}")
+    print(f"[口径] 有效帧数(odom覆盖)={covered_frames}  真值总数(命中+遗漏)={total}")
     print(f"真值命中={hit} 真值遗漏={miss} 误检={fp}")
     print(f"召回率={recall:.1f}% 误检率={fpr:.1f}%" + (f" 位置误差均值={err_mean:.2f}m" if errors else ""))
 
-    return {'name': name, 'hit': hit, 'miss': miss, 'fp': fp, 'recall': recall, 'fpr': fpr}
+    return {'name': name, 'hit': hit, 'miss': miss, 'fp': fp, 'recall': recall, 'fpr': fpr,
+            'det_count': len(det_records), 'covered_frames': covered_frames, 'gt_total': total}
 
 results = []
 for name, gt_key, det_key in CATEGORIES:
@@ -188,3 +196,14 @@ total_fp = sum(r['fp'] for r in results)
 overall_recall = total_hit/(total_hit+total_miss)*100 if (total_hit+total_miss) > 0 else 0
 overall_fpr = total_fp/(total_hit+total_fp)*100 if (total_hit+total_fp) > 0 else 0
 print(f"\n合计: 命中={total_hit} 遗漏={total_miss} 误检={total_fp} 总召回率={overall_recall:.1f}% 总误检率={overall_fpr:.1f}%")
+
+# 口径警告：2026-07-24发现det帧数会因为主循环行为变化（比如odom截止时间、
+# 新增的提前return路径）而变化，而真值总数是按det帧数统计出来的——两次跑测
+# 如果det覆盖的帧数差异很大，召回率就不是同一个口径，不能直接比较涨跌。
+det_count = results[0]['det_count'] if results else 0
+covered = results[0]['covered_frames'] if results else 0
+gt_total = sum(r['gt_total'] for r in results)
+print(f"\n[口径基准] det消息总数={det_count} 有效帧数(odom覆盖)={covered} 四类真值总数合计={gt_total}")
+print("[口径警告] 和其他跑测对比总召回率/总误检率之前，先比较这三个数字——")
+print("           如果det消息总数或有效帧数差异超过5%，说明两次统计的是不同的帧集合，")
+print("           总账不能直接比较涨跌，需要先统一时间窗口或帧集合再对比。")
