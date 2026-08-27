@@ -15,3 +15,17 @@ usv_ws/
 .idea/
 *.swp
 *.bak
+
+# 跑测产物（每次跑测都会变，不该进版本控制）
+boat_log.jsonl
+boat_logger.out
+comparison_results.txt
+stitching_reprojection_report.csv
+
+# 捕获数据目录
+bev_analysis/
+outputs/
+
+# 审计残留
+interface_audit.err
+interface_audit_result.json
