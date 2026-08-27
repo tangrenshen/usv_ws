@@ -40,6 +40,23 @@ def parse_args():
         action="store_true",
         help="Allow gt[0]-odom[0] when no validated/clock-derived offset exists.",
     )
+    parser.add_argument(
+        "--sensor-clock-gap",
+        type=float,
+        default=0.0,
+        help=(
+            "Additional seconds subtracted from det/det_buoy/det_pillar/det_block "
+            "stamps only, on top of --epoch-offset. Corrects a separate clock "
+            "domain gap between ros2 bag play's live-synthesized /clock (which "
+            "the node's now()-based publish stamp tracks) and the bag's own "
+            "recorded sensor/GT/odom clock domain (confirmed ~9.0s for "
+            "bag_09_03_17 via a full-population dt scan, 2026-08-25). Does not "
+            "touch GT/odom, which are already correctly aligned by --epoch-offset "
+            "alone - this is deliberately a separate, opt-in correction so the "
+            "already-validated recall/FP pipeline is unaffected unless explicitly "
+            "requested."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -317,7 +334,13 @@ def main():
         if record_type != "odom":
             align_to_odom(items, offset, odom_mid)
 
-    print(f"epoch_offset={offset:.6f} source={offset_source}")
+    if args.sensor_clock_gap:
+        det_keys = {key for _, _, key in CATEGORIES}
+        for record_type in det_keys:
+            for item in records[record_type]:
+                item["stamp"] -= args.sensor_clock_gap
+
+    print(f"epoch_offset={offset:.6f} source={offset_source} sensor_clock_gap={args.sensor_clock_gap:.3f}")
     print("matching=one-to-one maximum-cardinality; duplicate stamp=one frame")
     interpolate_odom = make_odom_interpolator(records["odom"])
 
