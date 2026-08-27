@@ -54,7 +54,18 @@ def parse_args():
             "touch GT/odom, which are already correctly aligned by --epoch-offset "
             "alone - this is deliberately a separate, opt-in correction so the "
             "already-validated recall/FP pipeline is unaffected unless explicitly "
-            "requested."
+            "requested. Applied only to buoy/pillar/block by default - see "
+            "--sensor-clock-gap-boat."
+        ),
+    )
+    parser.add_argument(
+        "--sensor-clock-gap-boat",
+        action="store_true",
+        help=(
+            "Also apply --sensor-clock-gap to boat (the sole dynamic category). "
+            "Default off: the 2026-08-25 investigation found this collapses "
+            "boat recall, since an imprecise gap value misprojects a moving "
+            "target's own GT position in a way stationary targets don't expose."
         ),
     )
     return parser.parse_args()
@@ -335,7 +346,13 @@ def main():
             align_to_odom(items, offset, odom_mid)
 
     if args.sensor_clock_gap:
-        det_keys = {key for _, _, key in CATEGORIES}
+        # Only apply to static categories (buoy/pillar/block) by default - boat
+        # is the sole dynamic category and the 2026-08-25 investigation found
+        # this correction collapses its recall (its own GT position moves, so
+        # an imprecise gap value misprojects it, unlike stationary targets).
+        # --sensor-clock-gap-boat opts boat in too, for testing only.
+        static_det_keys = {key for name, _, key in CATEGORIES if name != "boat"}
+        det_keys = static_det_keys | ({"det"} if args.sensor_clock_gap_boat else set())
         for record_type in det_keys:
             for item in records[record_type]:
                 item["stamp"] -= args.sensor_clock_gap
