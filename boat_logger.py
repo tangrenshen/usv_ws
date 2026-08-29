@@ -12,6 +12,7 @@ from geometry_msgs.msg import PoseArray
 from visualization_msgs.msg import MarkerArray, Marker
 from nav_msgs.msg import Odometry
 from tf2_msgs.msg import TFMessage
+from rosgraph_msgs.msg import Clock
 import json
 import re
 import os
@@ -42,6 +43,7 @@ class BoatLogger(Node):
                       'det': 0, 'det_buoy': 0, 'det_pillar': 0, 'det_block': 0, 'cluster': 0}
         self.cluster_frames = {}
         self.last_cluster_pos = 0
+        self.latest_clock = None
 
         qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE,
                           history=HistoryPolicy.KEEP_LAST)
@@ -51,6 +53,12 @@ class BoatLogger(Node):
         self.create_subscription(PoseArray, '/world/obstacles/buoys', self.on_gt_buoy, qos)
         self.create_subscription(PoseArray, '/world/obstacles/blocks', self.on_gt_block, qos)
         self.create_subscription(Odometry, '/wamv/sensors/position/ground_truth_odometry', self.on_odom, qos)
+        # four_category_evaluator_v2.resolve_epoch_offset()的首选方法
+        # (median(clock_stamp - odom_stamp))此前一直没有任何logger产出clock_stamp
+        # 字段，实际上从未被真正用过——一直靠--epoch-offset显式值或标了"not robust"
+        # 的legacy回退。这里补上，让该方法真正可用，避免contour诊断继续依赖
+        # 未经本次重新验证的历史epoch-offset数字。
+        self.create_subscription(Clock, '/clock', self.on_clock, qos)
         self.create_subscription(MarkerArray, '/world/obstacles/boats_check', self.on_det, qos)
         self.create_subscription(MarkerArray, '/world/obstacles/buoys_check', self.on_det_buoy, qos)
         self.create_subscription(MarkerArray, '/world/obstacles/pillars_check', self.on_det_pillar, qos)
@@ -66,6 +74,15 @@ class BoatLogger(Node):
     def _mk(self, msg):
         return {'stamp': self.stamp_sec(msg.header),
                 'poses': [{'x': p.position.x, 'y': p.position.y, 'z': p.position.z} for p in msg.poses]}
+
+    def _mk_oriented(self, msg):
+        # 同_mk，额外带朝向四元数——仅block轮廓旋转修正需要（第五节：block是唯一
+        # 非轴对称、需要修正的类别，boat同理但本轮推后，buoy/pillar在XY上旋转不变，
+        # 不需要）。
+        return {'stamp': self.stamp_sec(msg.header),
+                'poses': [{'x': p.position.x, 'y': p.position.y, 'z': p.position.z,
+                           'qx': p.orientation.x, 'qy': p.orientation.y,
+                           'qz': p.orientation.z, 'qw': p.orientation.w} for p in msg.poses]}
 
     def _mk_markers(self, msg):
         # *_check话题2026-08-24改用MarkerArray（赛会口径变更，PoseArray->MarkerArray，
@@ -96,14 +113,19 @@ class BoatLogger(Node):
         self.f.write(json.dumps(rec) + '\n'); self.count['gt_buoy'] += 1
 
     def on_gt_block(self, msg):
-        rec = self._mk(msg); rec['type'] = 'gt_block'
+        rec = self._mk_oriented(msg); rec['type'] = 'gt_block'
         self.f.write(json.dumps(rec) + '\n'); self.count['gt_block'] += 1
+
+    def on_clock(self, msg):
+        self.latest_clock = msg.clock.sec + msg.clock.nanosec * 1e-9
 
     def on_odom(self, msg):
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
         rec = {'type': 'odom', 'stamp': self.stamp_sec(msg.header),
                'x': p.x, 'y': p.y, 'z': p.z, 'qx': q.x, 'qy': q.y, 'qz': q.z, 'qw': q.w}
+        if self.latest_clock is not None:
+            rec['clock_stamp'] = self.latest_clock
         self.f.write(json.dumps(rec) + '\n'); self.count['odom'] += 1
 
     def on_det(self, msg):
