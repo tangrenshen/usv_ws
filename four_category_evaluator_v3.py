@@ -52,11 +52,43 @@ def main():
     if not records["odom"]:
         raise SystemExit("日志里没有 odom 记录")
 
-    offset, offset_source = ev.resolve_epoch_offset(records, None, True)
-    odom_mid = records["odom"][len(records["odom"]) // 2]["stamp"]
-    for rt, items in records.items():
-        if rt != "odom":
-            ev.align_to_odom(items, offset, odom_mid)
+    # ── 时间对齐 ──────────────────────────────────────────────
+    # 本日志里存在三个时钟域，且**不能只用偏移对齐**：
+    #   odom : 仿真时间 0.104~56.680   (跨度 56.6s)
+    #   gt   : 录制当时的挂钟epoch      (跨度 93.0s)
+    #   det  : 回放当天的挂钟epoch      (跨度 85.1s)
+    # odom的stamp按约0.61倍实时推进（录制时仿真跑不满实时，已在eval_history
+    # 中独立确认），所以gt与odom之间除偏移外还差一个**比例**；v2的
+    # align_to_odom只做纯偏移，两端会差到±18s，GT插值必然落空——实测v2在本
+    # 日志上skipped=733/733、全部指标为0，就是这个原因。
+    #
+    # 这里改为按各流自身的首末时刻做线性映射到odom时间轴。odom/gt/det都始于
+    # 同一次回放、终于同一次回放，端点在物理上对应，因此线性映射是合理的。
+    # 对齐是否成立由下面的静止目标位置误差自校验：立柱静止，若对齐错误其
+    # 位置误差会显著变大。
+    odom_t = [r["stamp"] for r in records["odom"]]
+    o0, o1 = min(odom_t), max(odom_t)
+
+    def remap(keys):
+        ts = [r["stamp"] for k in keys for r in records[k] if "stamp" in r]
+        if not ts:
+            return None
+        a, b = min(ts), max(ts)
+        if b - a < 1e-6:
+            return None
+        scale = (o1 - o0) / (b - a)
+        for k in keys:
+            for r in records[k]:
+                r["stamp"] = o0 + (r["stamp"] - a) * scale
+        return (a, b, scale)
+
+    gt_map  = remap([gk for _, gk, _ in CATS])
+    det_map = remap([dk for _, _, dk in CATS])
+    offset_source = "linear rate-corrected map to odom timeline"
+    offset = 0.0
+    print(f"[对齐] odom {o0:.3f}~{o1:.3f}")
+    if gt_map:  print(f"[对齐] gt  {gt_map[0]:.3f}~{gt_map[1]:.3f} scale={gt_map[2]:.4f}")
+    if det_map: print(f"[对齐] det {det_map[0]:.3f}~{det_map[1]:.3f} scale={det_map[2]:.4f}")
     if args.sensor_clock_gap:
         for _, _, dk in CATS:
             if dk == "det":       # boat 是唯一动态类别，默认不施加该修正
@@ -68,7 +100,7 @@ def main():
     gt_interp = {gk: ev.make_gt_interpolator(records[gk]) for _, gk, _ in CATS}
     dets = {dk: ev.deduplicate_frames(records[dk])[0] for _, _, dk in CATS}
 
-    print(f"epoch_offset={offset:.6f} source={offset_source}")
+    print(f"对齐方式: {offset_source}")
     print("口径: 遗漏率=漏检/真值总数  误检率=误检/检测总数  分类错误率=配错/检测总数")
     print("匹配: 一对一最大基数; 同一时间戳视为一帧\n")
 
