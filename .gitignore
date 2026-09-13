@@ -30,3 +30,7 @@ outputs/
 # 审计残留
 interface_audit.err
 interface_audit_result.json
+
+# 诊断导出产物（ImageStitcher 的 exportValidMasksPNG / exportMatchPointsCSV）
+cam*_valid_mask.png
+stitching_match_points.csv
